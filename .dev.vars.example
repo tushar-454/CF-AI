@@ -1,0 +1,4 @@
+# Cloudflare Workers local dev environment variables (optional)
+# Bindings are configured directly in cloudflare.config.ts and wrangler.jsonc.
+# If you add any custom API secrets, declare them here.
+APP_PIN=0000
