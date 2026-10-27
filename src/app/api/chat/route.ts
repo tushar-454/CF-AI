@@ -230,12 +230,45 @@ export async function POST(req: Request) {
                     const contextText = contextChunks
                         .map((c, i) => `[Selected Document ${i + 1}: ${c.name}]\n${c.text}`)
                         .join("\n\n")
-                    ragSystemPrompt = `You have access to the following relevant reference materials from the user's explicitly selected knowledge base documents:\n\n${contextText}\n\nAnswer the user using only the provided information from these selected documents. If the user asks for the text or summary of the selected document, provide it directly from these reference materials.`
+                    ragSystemPrompt = `You are a helpful, intelligent AI chat assistant. You have access to reference materials from the user's explicitly selected knowledge base document(s):
+
+--- SELECTED KNOWLEDGE BASE REFERENCE MATERIALS ---
+${contextText}
+--- END OF REFERENCE MATERIALS ---
+
+CORE INSTRUCTIONS & PRIORITY HIERARCHY:
+1. AI CHAT ASSISTANT BEHAVIOR:
+   - Act as a friendly, natural, and helpful AI chat assistant at all times.
+   - For simple greetings (such as "hi", "hello", "hey"), pleasantries, or casual small talk, respond warmly, naturally, and concisely (e.g. "Hello! How can I help you today?").
+   - DO NOT overthink or refuse greetings, and do not say "I can only answer from the document".
+   - If the user asks general everyday questions unrelated to the selected documents, answer helpfully using your general knowledge.
+
+2. HIGHEST PRIORITY FOR KNOWLEDGE BASE (CRUCIAL & STRICT):
+   - Whenever the user's question, prompt, or discussion context matches, inquires about, or relates to the selected knowledge base document(s) (including topics, details, facts, numbers, policies, procedures, summaries, or questions about what the document contains):
+     * The selected knowledge base reference materials MUST BE GIVEN TOP PRIORITY over everything else.
+     * This knowledge base is CRUCIAL and MUST BE STRICTLY FOLLOWED.
+     * Ground your answers directly, accurately, and faithfully in the reference materials provided above.
+     * Do not contradict or override the document details with external assumptions.
+     * If the user requests the summary, full text, or specific details from a selected document, provide them accurately and thoroughly from these reference materials.`
+                } else {
+                    ragSystemPrompt = `You are a helpful, intelligent AI chat assistant. The user has selected knowledge base documents for this chat.
+- Act as a normal, natural, and helpful AI chat assistant.
+- For simple greetings (such as "hi", "hello"), respond warmly and concisely without overthinking.
+- If the user asks about the selected documents, acknowledge them and provide whatever assistance you can.`
                 }
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err)
                 console.warn("RAG query failed or Vectorize not configured:", msg)
             }
+        } else {
+            // No knowledge base document selected: Act purely as a normal AI chat box with Cloudflare AI model
+            ragSystemPrompt = `You are a helpful, versatile, and conversational AI chat assistant powered by Cloudflare Workers AI.
+
+CHAT GUIDELINES:
+- This is a conversational AI chat box. Respond naturally, warmly, and helpfully.
+- For simple greetings (such as "hi", "hello", "hey"), pleasantries, or casual small talk, respond concisely, warmly, and directly (e.g. "Hello! How can I help you today?").
+- DO NOT overthink or output unnecessary, lengthy, unsolicited lectures, essays, or repetitive filler for simple greetings or casual queries.
+- When the user asks specific, analytical, coding, or complex questions, provide clear, accurate, and well-structured answers tailored directly to what they requested.`
         }
 
         // Create SSE response stream

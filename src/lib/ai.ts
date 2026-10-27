@@ -56,14 +56,15 @@ export function getEffortConfig(effort: EffortLevel = "medium"): EffortConfig {
                 temperature: 0.7,
                 max_tokens: 4096,
                 systemInstruction:
-                    "Provide exhaustive, rigorous, and step-by-step reasoning. Analyze edge cases and explain complex nuances thoroughly.",
+                    "Provide comprehensive, rigorous, and step-by-step reasoning for complex problems. For casual greetings, remain friendly and concise.",
             }
         case "medium":
         default:
             return {
                 temperature: 0.6,
                 max_tokens: 2048,
-                systemInstruction: "Provide clear, balanced, and helpful explanations.",
+                systemInstruction:
+                    "Provide clear, balanced, and helpful conversational responses. For simple greetings or small talk, respond naturally and briefly without unsolicited lectures.",
             }
     }
 }
@@ -155,16 +156,26 @@ export async function* streamChat(
     // Build the message list
     const fullMessages: Array<{ role: string; content: string }> = []
 
-    // Add system prompt if present or default
-    const systemDirectives = [effortConfig.systemInstruction]
+    // Add system directives: custom system prompt first, then effort guideline
+    const systemDirectives: string[] = []
     if (options.systemPrompt) {
         systemDirectives.push(options.systemPrompt)
     }
+    if (effortConfig.systemInstruction) {
+        systemDirectives.push(effortConfig.systemInstruction)
+    }
+    if (model.supportsReasoning) {
+        systemDirectives.push(
+            "For simple greetings (e.g. 'hi', 'hello', 'hey') or basic conversational pleasantries, keep internal reasoning minimal and respond directly and naturally."
+        )
+    }
 
-    fullMessages.push({
-        role: "system",
-        content: systemDirectives.join("\n\n"),
-    })
+    if (systemDirectives.length > 0) {
+        fullMessages.push({
+            role: "system",
+            content: systemDirectives.join("\n\n"),
+        })
+    }
 
     for (const m of messages) {
         fullMessages.push({
