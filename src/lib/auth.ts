@@ -34,22 +34,22 @@ export function getRequestContextEnv(reqOrContext?: any): Cloudflare.Env | Recor
 }
 
 /**
- * Get configured APP_PIN from request/context environment without using process.env
+ * Get configured APP_PIN from request/context environment without using hardcoded fallbacks.
  */
-export function getAppPin(reqOrContext?: any): string {
+export function getAppPin(reqOrContext?: any): string | undefined {
   const envObj = getRequestContextEnv(reqOrContext);
   const pin = (envObj as any)?.APP_PIN;
   if (typeof pin === "string" && pin.trim().length > 0) {
     return pin.trim();
   }
-  return "0000";
+  return undefined;
 }
 
 // Backward compatibility export (falls back to workersEnv)
-export const APP_PIN =
-  (typeof workersEnv !== "undefined" && (workersEnv as any)?.APP_PIN)
+export const APP_PIN: string | undefined =
+  typeof workersEnv !== "undefined" && (workersEnv as any)?.APP_PIN
     ? (workersEnv as any).APP_PIN
-    : "0000";
+    : undefined;
 
 /**
  * Verify if the provided PIN matches the application PIN from request/context env.
@@ -78,6 +78,10 @@ export function verifyPin(
   if (!pin) return false;
 
   const expectedPin = getAppPin(context);
+  if (!expectedPin) {
+    console.error("[Auth] Access denied: APP_PIN is not configured in Cloudflare environment secrets.");
+    return false;
+  }
   return pin.trim() === expectedPin;
 }
 
