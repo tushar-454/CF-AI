@@ -187,14 +187,32 @@ export interface DailyUsageSummary {
 }
 
 export const MODEL_NEURON_RATES: Record<string, { inputRate: number; outputRate: number; requiredPlan: string }> = {
+  // Fast / Small
   "@cf/meta/llama-3.2-3b-instruct": { inputRate: 30000, outputRate: 200000, requiredPlan: "Free" },
-  "@cf/meta/llama-3.3-70b-instruct-fp8-fast": { inputRate: 200000, outputRate: 700000, requiredPlan: "Paid" },
+  "@cf/meta/llama-3.2-1b-instruct": { inputRate: 20000, outputRate: 150000, requiredPlan: "Free" },
+  "@cf/microsoft/phi-2": { inputRate: 25000, outputRate: 180000, requiredPlan: "Free" },
+  "@cf/tinyllama/tinyllama-1.1b-chat-v1.0": { inputRate: 15000, outputRate: 100000, requiredPlan: "Free" },
+
+  // General
+  "@cf/meta/llama-3.1-8b-instruct": { inputRate: 50000, outputRate: 250000, requiredPlan: "Free" },
+  "@cf/meta/llama-3-8b-instruct": { inputRate: 45000, outputRate: 220000, requiredPlan: "Free" },
+  "@cf/mistral/mistral-7b-instruct-v0.1": { inputRate: 40000, outputRate: 220000, requiredPlan: "Free" },
   "@cf/google/gemma-7b-it": { inputRate: 40000, outputRate: 250000, requiredPlan: "Free" },
+  "@cf/openchat/openchat-3.5-0106": { inputRate: 40000, outputRate: 220000, requiredPlan: "Free" },
+
+  // Reasoning
   "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b": { inputRate: 100000, outputRate: 400000, requiredPlan: "Free" },
   "@cf/qwen/qwq-32b": { inputRate: 100000, outputRate: 400000, requiredPlan: "Free" },
   "@cf/openai/gpt-oss-20b": { inputRate: 80000, outputRate: 350000, requiredPlan: "Free" },
+
+  // Coding
   "@cf/qwen/qwen2.5-coder-32b-instruct": { inputRate: 100000, outputRate: 400000, requiredPlan: "Free" },
+
+  // Vision
   "@cf/meta/llama-3.2-11b-vision-instruct": { inputRate: 60000, outputRate: 300000, requiredPlan: "Free" },
+
+  // Historic / Reference
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast": { inputRate: 200000, outputRate: 700000, requiredPlan: "Paid" },
 };
 
 export async function getUsageMetrics(dbOverride?: any): Promise<DailyUsageSummary> {

@@ -62,7 +62,7 @@ export function ModelSelector({
   });
 
   const renderModelList = (isMobile: boolean = false) => (
-    <div className={`overflow-y-auto space-y-1.5 ${isMobile ? "max-h-[50vh] pr-1" : "max-h-64 pr-0.5"}`}>
+    <div className={`overflow-y-auto space-y-1.5 ${isMobile ? "max-h-[50vh] pr-1" : "max-h-80 pr-0.5"}`}>
       {filteredModels.length === 0 ? (
         <div className="text-center py-8 text-xs text-[var(--text-muted)]">No models match your search.</div>
       ) : (
@@ -90,6 +90,9 @@ export function ModelSelector({
                   <span className="text-xs font-semibold text-[var(--text-primary)] truncate">{model.label}</span>
                   <span className="text-[10px] px-1.5 py-0.5 rounded-md font-mono bg-[var(--badge-bg)] text-[var(--text-muted)] shrink-0">
                     {model.category}
+                  </span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0">
+                    Free
                   </span>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
@@ -146,6 +149,9 @@ export function ModelSelector({
                 <div className="flex items-center justify-between pb-2 mb-2 border-b border-[var(--border)] shrink-0">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-semibold text-[var(--text-primary)]">Select Model</span>
+                    <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                      100% Free Tier
+                    </span>
                     {hasImageAttachment && (
                       <span className="text-[10px] font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-200 dark:border-amber-800">
                         Requires Vision
@@ -201,10 +207,15 @@ export function ModelSelector({
           {/* Desktop Floating Popover (>= 640px) */}
           <div className="hidden sm:block absolute left-0 bottom-full mb-2 w-96 max-w-[calc(100vw-2rem)] rounded-2xl border border-[var(--border)] bg-[var(--surface-bg)] p-3 shadow-xl z-50 animate-in fade-in zoom-in-95 duration-100">
             <div className="flex items-center justify-between pb-2 mb-2 border-b border-[var(--border)]">
-              <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">Select Model</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">Select Model</span>
+                <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                  100% Free Tier
+                </span>
+              </div>
               {hasImageAttachment && (
                 <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-200 dark:border-amber-800">
-                  Image requires Vision model
+                  Requires Vision
                 </span>
               )}
             </div>
