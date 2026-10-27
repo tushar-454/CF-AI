@@ -126,7 +126,7 @@ export async function indexDocument(
             conversationId: conversationId || "",
             name: docName,
             chunkIndex: index,
-            text: chunk.slice(0, 500), // Keep a snippet for quick display if needed
+            text: chunk.slice(0, 1500), // Keep the full chunk text for RAG prompt context
         },
     }))
 

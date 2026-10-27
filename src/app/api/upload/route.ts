@@ -1,6 +1,7 @@
 import { createDocument } from "@/lib/db"
 import { getR2 } from "@/lib/ai"
 import { indexDocument } from "@/lib/rag"
+import { isPdfFile, extractPdfText } from "@/lib/pdf"
 import { env } from "cloudflare:workers"
 import { verifyPin } from "@/lib/auth"
 import { AppEnv } from "@/lib/types"
@@ -91,15 +92,19 @@ export async function POST(req: Request) {
         const ext = file.name.split(".").pop() || "bin"
         const r2Key = `uploads/${documentId}.${ext}`
         const isImage = file.type.startsWith("image/")
-        const isText = isTextFile(file.type, file.name)
+        const isPdf = isPdfFile(file.type, file.name)
+        const isText = !isPdf && isTextFile(file.type, file.name)
 
         const arrayBuffer = await file.arrayBuffer()
 
         // Store in R2 bucket
         const r2 = getR2()
+        const contentType =
+            file.type ||
+            (isPdf ? "application/pdf" : isText ? "text/plain" : "application/octet-stream")
         await r2.put(r2Key, arrayBuffer, {
             httpMetadata: {
-                contentType: file.type || "application/octet-stream",
+                contentType,
             },
             customMetadata: {
                 originalName: file.name,
@@ -111,34 +116,49 @@ export async function POST(req: Request) {
         let extractedText = ""
         const status: "ready" | "image" | "processing" | "error" = isImage ? "image" : "ready"
 
+        const appEnv = env as unknown as AppEnv
+        const ai = appEnv.AI
+        const vectorize = appEnv.VECTORIZE
+
         if (isText) {
             try {
                 const decoder = new TextDecoder("utf-8")
                 extractedText = decoder.decode(arrayBuffer)
-
-                // If Vectorize and AI bindings are available, index the text
-                const appEnv = env as unknown as AppEnv
-                const ai = appEnv.AI
-                const vectorize = appEnv.VECTORIZE
-                if (ai && vectorize && extractedText.trim()) {
-                    try {
-                        await indexDocument(
-                            ai,
-                            vectorize,
-                            documentId,
-                            file.name,
-                            extractedText,
-                            conversationId
-                        )
-                    } catch (ragErr) {
-                        console.warn(
-                            "Could not index document in Vectorize (likely placeholder config):",
-                            ragErr
-                        )
-                    }
-                }
             } catch (decodeErr) {
                 console.warn("Failed to decode text file:", decodeErr)
+            }
+        } else if (isPdf) {
+            try {
+                extractedText = await extractPdfText(arrayBuffer, ai)
+                if (!extractedText.trim()) {
+                    console.info(
+                        `PDF "${file.name}" uploaded, but no text layer was detected (may be scanned image).`
+                    )
+                }
+            } catch (pdfErr) {
+                console.warn("Failed to extract text from PDF:", pdfErr)
+            }
+        }
+
+        // If Vectorize and AI bindings are available, index the text
+        if (ai && vectorize && extractedText.trim()) {
+            try {
+                const result = await indexDocument(
+                    ai,
+                    vectorize,
+                    documentId,
+                    file.name,
+                    extractedText,
+                    conversationId
+                )
+                console.log(
+                    `Indexed "${file.name}" with ${result.chunksIndexed} chunk(s) into Vectorize.`
+                )
+            } catch (ragErr) {
+                console.warn(
+                    "Could not index document in Vectorize (likely placeholder config):",
+                    ragErr
+                )
             }
         }
 
@@ -163,14 +183,15 @@ export async function POST(req: Request) {
             id: documentId,
             conversation_id: conversationId,
             name: file.name,
-            mime: file.type || "application/octet-stream",
+            mime: contentType,
             size: file.size,
             r2_key: r2Key,
             isImage,
+            isPdf,
             url: `/api/files/${documentId}`,
             r2_url: `/api/r2?key=${encodeURIComponent(r2Key)}`,
             status,
-            textContent: extractedText ? extractedText.slice(0, 4000) : undefined, // Provide preview/context
+            textContent: extractedText ? extractedText.slice(0, 16000) : undefined, // Provide preview/context
         })
     } catch (error: unknown) {
         console.error("Error in POST /api/upload:", error)

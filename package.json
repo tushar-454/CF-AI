@@ -9,6 +9,7 @@
         "react": "latest",
         "react-dom": "latest",
         "react-server-dom-webpack": "latest",
+        "unpdf": "^1.9.1",
         "vinext": "latest",
         "zod": "^4.6.7"
     },
