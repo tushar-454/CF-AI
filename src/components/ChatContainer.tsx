@@ -10,7 +10,7 @@ import { KnowledgeBaseModal } from "./KnowledgeBaseModal";
 import { UsageModal } from "./UsageModal";
 import { PinLogin } from "./PinLogin";
 import { Toast, ToastMessage } from "./Toast";
-import { ActivityIcon, ArrowDownIcon, BookOpenIcon, LockIcon, MenuIcon, SparklesIcon } from "./Icons";
+import { ActivityIcon, ArrowDownIcon, BookOpenIcon, CheckIcon, LinkIcon, LockIcon, MenuIcon, SparklesIcon } from "./Icons";
 import { AUTH_STORAGE_KEY, getAuthHeaders, verifyPin } from "@/lib/auth";
 
 const SUGGESTED_PROMPTS = [
@@ -31,6 +31,12 @@ const SUGGESTED_PROMPTS = [
 export function ChatContainer() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | undefined>(undefined);
+  const [activeConversationTitle, setActiveConversationTitle] = useState<string>("");
+  const [isLoadingConversation, setIsLoadingConversation] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const activeConversationIdRef = useRef<string | undefined>(undefined);
+  activeConversationIdRef.current = activeConversationId;
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [models, setModels] = useState<ModelInfo[]>(MODELS);
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODEL_ID);
@@ -102,6 +108,14 @@ export function ChatContainer() {
   const handleSelectModel = (id: string) => {
     setSelectedModel(id);
     localStorage.setItem("cf_ai_model", id);
+    const m = models.find((item) => item.id === id);
+    if (m?.supportsVision) {
+      fetch("/api/models/agree", {
+        method: "POST",
+        headers: getAuthHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ model: id }),
+      }).catch(() => {});
+    }
   };
 
   const handleChangeContextMode = (mode: ContextMode) => {
@@ -152,28 +166,127 @@ export function ChatContainer() {
     }
   }, [isAuthenticated, loadConversations]);
 
-  // Load conversation messages
+  // Update the URL search params (?id=<convId>) without page reload
+  const updateUrlConversationId = useCallback((id: string | undefined, replace: boolean = false) => {
+    if (typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    const currentId = url.searchParams.get("id") || url.searchParams.get("c") || url.searchParams.get("chat");
+    if (currentId === (id || null)) return;
+
+    if (id) {
+      url.searchParams.set("id", id);
+      url.searchParams.delete("c");
+      url.searchParams.delete("chat");
+    } else {
+      url.searchParams.delete("id");
+      url.searchParams.delete("c");
+      url.searchParams.delete("chat");
+    }
+    const nextUrl = url.pathname + (url.search ? url.search : "");
+    if (replace) {
+      window.history.replaceState({ conversationId: id }, "", nextUrl);
+    } else {
+      window.history.pushState({ conversationId: id }, "", nextUrl);
+    }
+  }, []);
+
+  // Copy shareable link for a conversation
+  const handleCopyConversationLink = useCallback(async (id?: string) => {
+    const targetId = id || activeConversationId;
+    if (!targetId || typeof window === "undefined") return;
+    const url = new URL(window.location.origin + window.location.pathname);
+    url.searchParams.set("id", targetId);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2000);
+      addToast("Chat link copied to clipboard!");
+    } catch {
+      addToast("Failed to copy link", true);
+    }
+  }, [activeConversationId, addToast]);
+
+  // Load conversation messages and optionally update URL
   const loadConversationMessages = useCallback(
-    async (id: string) => {
+    async (id: string, updateUrl: boolean = false, replaceUrl: boolean = false) => {
       try {
+        setIsLoadingConversation(true);
         const res = await fetch(`/api/conversations/${id}`, { headers: getAuthHeaders() });
         if (res.ok) {
           const data: any = await res.json();
           setMessages(Array.isArray(data.messages) ? data.messages : []);
           setActiveConversationId(id);
+          if (data.title) {
+            setActiveConversationTitle(data.title);
+          }
+          if (data.model) {
+            setSelectedModel(data.model);
+          }
+          if (updateUrl) {
+            updateUrlConversationId(id, replaceUrl);
+          }
+        } else if (res.status === 404) {
+          addToast("Conversation not found", true);
+          setActiveConversationId(undefined);
+          setActiveConversationTitle("");
+          setMessages([]);
+          updateUrlConversationId(undefined, true);
+        } else {
+          const err: any = await res.json().catch(() => ({}));
+          addToast(err?.error || "Failed to load conversation", true);
         }
       } catch (err: any) {
         addToast(err?.message || "Failed to load conversation messages", true);
+      } finally {
+        setIsLoadingConversation(false);
       }
     },
-    [addToast]
+    [addToast, updateUrlConversationId]
   );
+
+  // Check URL params on initial mount or authentication to load older conversation
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const params = new URLSearchParams(window.location.search);
+    const targetId = params.get("id") || params.get("c") || params.get("chat");
+    if (targetId) {
+      loadConversationMessages(targetId, true, true);
+    }
+  }, [isAuthenticated, loadConversationMessages]);
+
+  // Handle browser Back and Forward navigation (popstate)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const handlePopState = () => {
+      const params = new URLSearchParams(window.location.search);
+      const targetId = params.get("id") || params.get("c") || params.get("chat");
+      if (targetId) {
+        if (targetId !== activeConversationIdRef.current) {
+          loadConversationMessages(targetId, false, false);
+        }
+      } else {
+        if (activeConversationIdRef.current) {
+          setActiveConversationId(undefined);
+          setActiveConversationTitle("");
+          setMessages([]);
+        }
+      }
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [isAuthenticated, loadConversationMessages]);
 
   const handleSelectConversation = (id: string) => {
     if (isStreaming) {
       handleStopGeneration();
     }
-    loadConversationMessages(id);
+    const found = conversations.find((c) => c.id === id);
+    if (found) {
+      setActiveConversationTitle(found.title);
+    }
+    loadConversationMessages(id, true, false);
   };
 
   const handleNewChat = () => {
@@ -181,9 +294,11 @@ export function ChatContainer() {
       handleStopGeneration();
     }
     setActiveConversationId(undefined);
+    setActiveConversationTitle("");
     setMessages([]);
     setStreamingContent("");
     setStreamingReasoning("");
+    updateUrlConversationId(undefined, false);
   };
 
   const handleRenameConversation = async (id: string, newTitle: string) => {
@@ -197,6 +312,9 @@ export function ChatContainer() {
         setConversations((prev) =>
           prev.map((c) => (c.id === id ? { ...c, title: newTitle } : c))
         );
+        if (activeConversationId === id) {
+          setActiveConversationTitle(newTitle);
+        }
       }
     } catch {
       addToast("Failed to rename conversation", true);
@@ -293,10 +411,31 @@ export function ChatContainer() {
 
       if (!res.ok) {
         const errData: any = await res.json().catch(() => ({}));
+        const rawErrMsg = errData.error || `Request failed with status ${res.status}`;
+        if (
+          rawErrMsg.includes("5016") ||
+          rawErrMsg.includes("submit the prompt 'agree'") ||
+          rawErrMsg.includes("Community License")
+        ) {
+          addToast("Accepting model license agreement and retrying...", false);
+          try {
+            await fetch("/api/models/agree", {
+              method: "POST",
+              headers: getAuthHeaders({ "Content-Type": "application/json" }),
+              body: JSON.stringify({ model: selectedModel }),
+            });
+            setIsStreaming(false);
+            setTimeout(() => {
+              handleSendMessage(text, attachments);
+            }, 500);
+            return;
+          } catch {}
+        }
+
         if (res.status === 503 || errData.isBindingError) {
           addToast(errData.error || "Cloudflare resource binding is unconfigured.", true);
         } else {
-          addToast(errData.error || `Request failed with status ${res.status}`, true);
+          addToast(rawErrMsg, true);
         }
         setIsStreaming(false);
         return;
@@ -334,11 +473,38 @@ export function ChatContainer() {
           try {
             const event = JSON.parse(rawData);
             if (event.error) {
+              const errStr = String(event.error);
+              if (
+                errStr.includes("5016") ||
+                errStr.includes("submit the prompt 'agree'") ||
+                errStr.includes("Community License")
+              ) {
+                addToast("Accepting model license agreement and retrying...", false);
+                try {
+                  await fetch("/api/models/agree", {
+                    method: "POST",
+                    headers: getAuthHeaders({ "Content-Type": "application/json" }),
+                    body: JSON.stringify({ model: selectedModel }),
+                  });
+                  setIsStreaming(false);
+                  setTimeout(() => {
+                    handleSendMessage(text, attachments);
+                  }, 500);
+                  break;
+                } catch {}
+              }
               addToast(event.error, true);
               break;
             }
             if (event.conversationId) {
               serverConversationId = event.conversationId;
+              setActiveConversationId((prev) => {
+                if (!prev) {
+                  updateUrlConversationId(event.conversationId, true);
+                  return event.conversationId;
+                }
+                return prev;
+              });
             }
             if (event.messageId) {
               finalMessageId = event.messageId;
@@ -377,8 +543,11 @@ export function ChatContainer() {
       setStreamingReasoning("");
       setIsStreaming(false);
 
-      if (serverConversationId && serverConversationId !== activeConversationId) {
-        setActiveConversationId(serverConversationId);
+      if (serverConversationId) {
+        if (serverConversationId !== activeConversationId) {
+          setActiveConversationId(serverConversationId);
+        }
+        updateUrlConversationId(serverConversationId, true);
       }
       loadConversations();
     } catch (err: any) {
@@ -446,6 +615,7 @@ export function ChatContainer() {
         onNewChat={handleNewChat}
         onRenameConversation={handleRenameConversation}
         onDeleteConversation={handleDeleteConversation}
+        onCopyLink={handleCopyConversationLink}
         onOpenKnowledgeBase={() => setIsKnowledgeBaseOpen(true)}
         onOpenUsage={() => setIsUsageOpen(true)}
         onLockApp={handleLockApp}
@@ -458,51 +628,81 @@ export function ChatContainer() {
       {/* Main Chat Column */}
       <div className="flex-1 flex flex-col h-full min-w-0 relative">
         {/* Top Navbar */}
-        <header className="h-14 border-b border-[var(--border)] px-4 flex items-center justify-between bg-[var(--background)]/80 backdrop-blur-md z-10 shrink-0">
-          <div className="flex items-center gap-2">
+        <header className="h-14 border-b border-[var(--border)] px-2.5 sm:px-4 flex items-center justify-between bg-[var(--background)]/85 backdrop-blur-md z-10 shrink-0 gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
             <button
               type="button"
               onClick={() => setIsMobileSidebarOpen(true)}
-              className="md:hidden p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)]"
+              className="md:hidden p-2 rounded-xl text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] shrink-0 active:scale-95 cursor-pointer"
               aria-label="Open sidebar"
             >
               <MenuIcon size={18} />
             </button>
-            <span className="text-xs font-semibold text-[var(--text-primary)] truncate max-w-[200px] sm:max-w-md">
+            <span className="text-xs sm:text-sm font-semibold text-[var(--text-primary)] truncate max-w-[140px] xs:max-w-[200px] sm:max-w-md">
               {activeConversationId
-                ? conversations.find((c) => c.id === activeConversationId)?.title || "Chat"
+                ? activeConversationTitle || conversations.find((c) => c.id === activeConversationId)?.title || "Chat"
                 : "Claude Cloudflare AI"}
             </span>
+
+            {/* Quick Share / Copy Link button when chat is active (Desktop) */}
+            {activeConversationId && (
+              <button
+                type="button"
+                onClick={() => handleCopyConversationLink(activeConversationId)}
+                className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium text-[var(--accent)] hover:bg-[var(--selected-bg)] transition-colors cursor-pointer border border-[var(--accent)]/30 shrink-0"
+                title="Copy shareable link for this conversation"
+              >
+                {copiedLink ? <CheckIcon size={12} className="text-emerald-500" /> : <LinkIcon size={12} />}
+                <span>{copiedLink ? "Link Copied" : "Copy Link"}</span>
+              </button>
+            )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+            {/* Mobile quick copy button */}
+            {activeConversationId && (
+              <button
+                type="button"
+                onClick={() => handleCopyConversationLink(activeConversationId)}
+                className="sm:hidden p-2 rounded-xl text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] bg-[var(--surface-bg)] transition-colors cursor-pointer active:scale-95"
+                title="Copy shareable chat link"
+                aria-label="Copy chat link"
+              >
+                {copiedLink ? <CheckIcon size={15} className="text-emerald-500" /> : <LinkIcon size={15} className="text-[var(--accent)]" />}
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => setIsUsageOpen(true)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] transition-colors"
+              className="inline-flex items-center gap-1.5 p-2 sm:px-2.5 sm:py-1.5 rounded-xl text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] bg-[var(--surface-bg)] transition-colors cursor-pointer active:scale-95"
               title="Workers AI daily usage & free tier quota"
+              aria-label="Workers AI Usage"
             >
-              <ActivityIcon size={14} className="text-[var(--accent)]" />
+              <ActivityIcon size={15} className="text-[var(--accent)]" />
               <span className="hidden sm:inline">Usage</span>
-              <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-emerald-500/10 text-emerald-500">10k Free</span>
+              <span className="hidden xs:inline text-[10px] font-mono px-1 py-0.2 rounded bg-emerald-500/10 text-emerald-500">10k Free</span>
             </button>
 
             <button
               type="button"
               onClick={() => setIsKnowledgeBaseOpen(true)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] transition-colors"
+              className="inline-flex items-center gap-1.5 p-2 sm:px-2.5 sm:py-1.5 rounded-xl text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] bg-[var(--surface-bg)] transition-colors cursor-pointer active:scale-95"
+              title="Knowledge Base & RAG documents"
+              aria-label="Knowledge Base"
             >
-              <BookOpenIcon size={14} className="text-[var(--accent)]" />
+              <BookOpenIcon size={15} className="text-[var(--accent)]" />
               <span className="hidden sm:inline">Knowledge Base</span>
             </button>
 
             <button
               type="button"
               onClick={handleLockApp}
-              className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] transition-colors cursor-pointer"
+              className="p-2 rounded-xl text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] bg-[var(--surface-bg)] transition-colors cursor-pointer active:scale-95"
               title="Lock application (require PIN)"
+              aria-label="Lock application"
             >
-              <LockIcon size={14} />
+              <LockIcon size={15} />
             </button>
           </div>
         </header>
@@ -511,35 +711,40 @@ export function ChatContainer() {
         <div
           ref={chatScrollContainerRef}
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto px-4 py-6 scrollbar-thin relative"
+          className="flex-1 overflow-y-auto px-2.5 sm:px-4 py-4 sm:py-6 scrollbar-thin relative"
         >
-          {messages.length === 0 && !isStreaming ? (
-            /* Empty State */
+          {isLoadingConversation ? (
             <div className="max-w-2xl mx-auto h-full flex flex-col items-center justify-center text-center px-4 py-12">
-              <div className="w-12 h-12 rounded-2xl bg-[var(--accent)] text-white flex items-center justify-center font-serif font-bold text-2xl shadow-md mb-4">
+              <div className="w-8 h-8 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin mb-3" />
+              <p className="text-xs text-[var(--text-muted)] font-medium">Loading conversation history...</p>
+            </div>
+          ) : messages.length === 0 && !isStreaming ? (
+            /* Empty State */
+            <div className="max-w-2xl mx-auto h-full flex flex-col items-center justify-center text-center px-3 sm:px-4 py-8 sm:py-12">
+              <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-[var(--accent)] text-white flex items-center justify-center font-serif font-bold text-xl sm:text-2xl shadow-md mb-3 sm:mb-4">
                 C
               </div>
-              <h1 className="text-2xl sm:text-3xl font-serif font-medium text-[var(--text-primary)] tracking-tight mb-2">
+              <h1 className="text-xl sm:text-3xl font-serif font-medium text-[var(--text-primary)] tracking-tight mb-2">
                 {getGreeting()}
               </h1>
-              <p className="text-sm text-[var(--text-muted)] max-w-md mb-8">
+              <p className="text-xs sm:text-sm text-[var(--text-muted)] max-w-md mb-6 sm:mb-8 leading-relaxed">
                 Ask anything, synthesize complex code, analyze images, or query documents with Cloudflare RAG.
               </p>
 
               {/* 3 Suggested Prompt Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-3 w-full">
                 {SUGGESTED_PROMPTS.map((item, idx) => (
                   <button
                     key={idx}
                     type="button"
                     onClick={() => handleSendMessage(item.prompt)}
-                    className="p-4 rounded-2xl border border-[var(--border)] bg-[var(--surface-bg)] hover:bg-[var(--selected-bg)] hover:border-[var(--accent)] text-left transition-all shadow-xs group"
+                    className="p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-[var(--border)] bg-[var(--surface-bg)] hover:bg-[var(--selected-bg)] hover:border-[var(--accent)] text-left transition-all shadow-xs group active:scale-[0.99] cursor-pointer"
                   >
-                    <div className="flex items-center gap-2 text-xs font-semibold text-[var(--text-primary)] mb-1 group-hover:text-[var(--accent)]">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-[var(--text-primary)] mb-1 group-hover:text-[var(--accent)]">
                       <SparklesIcon size={13} className="text-[var(--accent)] shrink-0" />
-                      <span>{item.title}</span>
+                      <span className="truncate">{item.title}</span>
                     </div>
-                    <p className="text-xs text-[var(--text-muted)] line-clamp-3 leading-relaxed">
+                    <p className="text-[11px] sm:text-xs text-[var(--text-muted)] line-clamp-2 sm:line-clamp-3 leading-relaxed">
                       {item.prompt}
                     </p>
                   </button>
@@ -581,7 +786,7 @@ export function ChatContainer() {
             <button
               type="button"
               onClick={() => scrollToBottom("smooth")}
-              className="fixed bottom-28 right-8 p-2 rounded-full bg-[var(--surface-bg)] text-[var(--text-primary)] border border-[var(--border)] shadow-lg hover:bg-[var(--button-hover)] transition-all z-20"
+              className="fixed bottom-24 sm:bottom-28 right-4 sm:right-8 p-2 rounded-full bg-[var(--surface-bg)] text-[var(--text-primary)] border border-[var(--border)] shadow-lg hover:bg-[var(--button-hover)] transition-all z-20 cursor-pointer"
               title="Scroll to bottom"
               aria-label="Scroll to bottom"
             >

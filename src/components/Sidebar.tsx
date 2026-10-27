@@ -7,6 +7,7 @@ import {
   BookOpenIcon,
   CheckIcon,
   EditIcon,
+  LinkIcon,
   LockIcon,
   MoonIcon,
   PlusIcon,
@@ -23,6 +24,7 @@ interface SidebarProps {
   onNewChat: () => void;
   onRenameConversation: (id: string, newTitle: string) => void;
   onDeleteConversation: (id: string) => void;
+  onCopyLink?: (id: string) => void;
   onOpenKnowledgeBase: () => void;
   onOpenUsage?: () => void;
   onLockApp?: () => void;
@@ -39,6 +41,7 @@ export function Sidebar({
   onNewChat,
   onRenameConversation,
   onDeleteConversation,
+  onCopyLink,
   onOpenKnowledgeBase,
   onOpenUsage,
   onLockApp,
@@ -161,6 +164,19 @@ export function Sidebar({
                     </button>
 
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      {onCopyLink && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onCopyLink(c.id);
+                          }}
+                          className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-bg)]"
+                          title="Copy link to chat"
+                        >
+                          <LinkIcon size={13} />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={(e) => {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createConversation, createMessage, getConversation, getMessages } from "@/lib/db";
-import { streamChat } from "@/lib/ai";
+import { acceptModelAgreement, streamChat } from "@/lib/ai";
 import { createSSEStream, SSE_HEADERS } from "@/lib/sse";
 import { queryKnowledge } from "@/lib/rag";
 import { DEFAULT_MODEL_ID } from "@/lib/models";
@@ -142,6 +142,11 @@ export async function POST(req: Request) {
       let fullAssistantReasoning = "";
 
       try {
+        // Send initial conversationId so client can immediately link the chat in the URL
+        await send({
+          conversationId,
+        });
+
         const generator = streamChat(model, chatMessages, {
           effort,
           attachments,
@@ -182,8 +187,18 @@ export async function POST(req: Request) {
         await send("[DONE]");
       } catch (streamError: any) {
         console.error("Stream error in /api/chat:", streamError);
+        const errMsg = streamError?.message || "An error occurred during inference";
+        if (
+          errMsg.includes("5016") ||
+          errMsg.includes("submit the prompt 'agree'") ||
+          errMsg.includes("Community License")
+        ) {
+          try {
+            await acceptModelAgreement(model);
+          } catch {}
+        }
         await send({
-          error: streamError?.message || "An error occurred during inference",
+          error: errMsg,
         });
       } finally {
         await close();

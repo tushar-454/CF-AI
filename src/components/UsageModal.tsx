@@ -90,20 +90,20 @@ export function UsageModal({ isOpen, onClose }: UsageModalProps) {
   const percent = current ? Math.min(100, Math.max(0, current.percentUsed)) : 0;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-xs animate-in fade-in duration-200">
       <div
-        className="relative w-full max-w-2xl bg-[var(--surface-bg)] border border-[var(--border)] rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden text-[var(--text-primary)]"
+        className="relative w-full max-w-2xl bg-[var(--surface-bg)] border border-[var(--border)] rounded-2xl shadow-2xl flex flex-col max-h-[92vh] sm:max-h-[90vh] overflow-hidden text-[var(--text-primary)]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border)]">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-[var(--badge-bg)] text-[var(--accent)] flex items-center justify-center">
+        <div className="flex items-center justify-between px-4 py-3 sm:px-6 sm:py-4 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-[var(--badge-bg)] text-[var(--accent)] flex items-center justify-center shrink-0">
               <ActivityIcon size={18} />
             </div>
-            <div>
-              <h2 className="text-base font-semibold">Workers AI Usage & Limits</h2>
-              <p className="text-xs text-[var(--text-muted)]">
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-semibold truncate">Workers AI Usage & Limits</h2>
+              <p className="text-[11px] sm:text-xs text-[var(--text-muted)] truncate">
                 Daily free allowance: 10,000 Neurons (resets at 00:00 UTC)
               </p>
             </div>
@@ -112,14 +112,15 @@ export function UsageModal({ isOpen, onClose }: UsageModalProps) {
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] transition-colors"
+            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] transition-colors cursor-pointer shrink-0"
+            aria-label="Close"
           >
             <XIcon size={18} />
           </button>
         </div>
 
         {/* Content Body */}
-        <div className="p-6 overflow-y-auto space-y-6">
+        <div className="p-3.5 sm:p-6 overflow-y-auto space-y-4 sm:space-y-6">
           {loading ? (
             <div className="py-12 flex flex-col items-center justify-center text-[var(--text-muted)]">
               <div className="w-6 h-6 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin mb-3" />
@@ -195,8 +196,8 @@ export function UsageModal({ isOpen, onClose }: UsageModalProps) {
                   <h3 className="text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">
                     Today&apos;s Usage by Model
                   </h3>
-                  <div className="border border-[var(--border)] rounded-xl overflow-hidden text-xs">
-                    <table className="w-full text-left">
+                  <div className="border border-[var(--border)] rounded-xl overflow-x-auto text-xs">
+                    <table className="w-full text-left min-w-[340px]">
                       <thead className="bg-[var(--main-bg)] text-[var(--text-muted)] border-b border-[var(--border)] font-medium">
                         <tr>
                           <th className="py-2 px-3">Model</th>
@@ -237,8 +238,8 @@ export function UsageModal({ isOpen, onClose }: UsageModalProps) {
                   </span>
                 </div>
 
-                <div className="border border-[var(--border)] rounded-xl overflow-hidden text-xs max-h-56 overflow-y-auto">
-                  <table className="w-full text-left">
+                <div className="border border-[var(--border)] rounded-xl overflow-x-auto text-xs max-h-56 overflow-y-auto">
+                  <table className="w-full text-left min-w-[420px]">
                     <thead className="bg-[var(--main-bg)] text-[var(--text-muted)] border-b border-[var(--border)] font-medium sticky top-0">
                       <tr>
                         <th className="py-2 px-3">Model</th>

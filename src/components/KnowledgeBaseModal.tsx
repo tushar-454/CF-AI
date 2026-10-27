@@ -97,33 +97,34 @@ export function KnowledgeBaseModal({ isOpen, onClose, onNotification }: Knowledg
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-150">
-      <div className="w-full max-w-2xl rounded-2xl border border-[var(--border)] bg-[var(--surface-bg)] shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-150">
+      <div className="w-full max-w-2xl rounded-2xl border border-[var(--border)] bg-[var(--surface-bg)] shadow-2xl overflow-hidden flex flex-col max-h-[90vh] sm:max-h-[85vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--border)] bg-[var(--sidebar-bg)]">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-amber-500/10 text-[var(--accent)]">
+        <div className="flex items-center justify-between px-4 py-3 sm:px-6 sm:py-4 border-b border-[var(--border)] bg-[var(--sidebar-bg)]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="p-2 rounded-xl bg-amber-500/10 text-[var(--accent)] shrink-0">
               <BookOpenIcon size={20} />
             </div>
-            <div>
-              <h2 className="text-base font-semibold text-[var(--text-primary)]">Knowledge Base Documents</h2>
-              <p className="text-xs text-[var(--text-muted)]">RAG Vectorize semantic storage & R2 file store</p>
+            <div className="min-w-0">
+              <h2 className="text-sm sm:text-base font-semibold text-[var(--text-primary)] truncate">Knowledge Base Documents</h2>
+              <p className="text-[11px] sm:text-xs text-[var(--text-muted)] truncate">RAG Vectorize semantic storage & R2 file store</p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] transition-colors"
+            className="p-1.5 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] transition-colors cursor-pointer shrink-0"
+            aria-label="Close"
           >
             <XIcon size={18} />
           </button>
         </div>
 
         {/* Upload Zone */}
-        <div className="p-6 border-b border-[var(--border)]">
+        <div className="p-4 sm:p-6 border-b border-[var(--border)]">
           <div
             onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-[var(--border)] hover:border-[var(--accent)] rounded-xl p-6 text-center cursor-pointer transition-colors bg-[var(--sidebar-bg)] hover:bg-[var(--selected-bg)]"
+            className="border-2 border-dashed border-[var(--border)] hover:border-[var(--accent)] rounded-xl p-4 sm:p-6 text-center cursor-pointer transition-colors bg-[var(--sidebar-bg)] hover:bg-[var(--selected-bg)]"
           >
             <input
               type="file"

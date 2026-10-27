@@ -64,18 +64,54 @@ export function getEffortConfig(effort: EffortLevel = "medium"): EffortConfig {
 }
 
 /**
+ * Automatically submit required license agreement for gated models (e.g. Meta Llama 3.2 Vision)
+ * Cloudflare error 5016 requires submitting the prompt 'agree' once per account.
+ */
+export async function acceptModelAgreement(modelId: string, aiOverride?: any): Promise<boolean> {
+  const ai = getAi(aiOverride);
+  try {
+    await ai.run(modelId, { prompt: "agree" });
+    console.log(`Accepted license agreement for model: ${modelId}`);
+    return true;
+  } catch {
+    try {
+      await ai.run(modelId, { messages: [{ role: "user", content: "agree" }] });
+      console.log(`Accepted license agreement for model via messages: ${modelId}`);
+      return true;
+    } catch (err2: any) {
+      console.warn(`Could not submit 'agree' to model ${modelId}:`, err2?.message || err2);
+      return false;
+    }
+  }
+}
+
+/**
  * Transcribe audio using Workers AI Whisper
  */
 export async function transcribeAudio(audioBytes: ArrayBuffer | Uint8Array, aiOverride?: any): Promise<string> {
   const ai = getAi(aiOverride);
   const uint8 = audioBytes instanceof Uint8Array ? audioBytes : new Uint8Array(audioBytes);
+  if (uint8.byteLength < 500) {
+    return "";
+  }
   const audioArray = Array.from(uint8);
 
-  const response = await ai.run(TRANSCRIPTION_MODEL_ID, {
-    audio: audioArray,
-  });
-
-  return response?.text || "";
+  try {
+    const response = await ai.run(TRANSCRIPTION_MODEL_ID, {
+      audio: audioArray,
+    });
+    return response?.text || "";
+  } catch (err: any) {
+    console.warn("Primary Whisper transcription failed, attempting whisper-large-v3-turbo fallback:", err?.message);
+    try {
+      const response = await ai.run("@cf/openai/whisper-large-v3-turbo", {
+        audio: audioArray,
+      });
+      return response?.text || "";
+    } catch {
+      throw err;
+    }
+  }
 }
 
 /**
@@ -145,8 +181,25 @@ export async function* streamChat(
     }
   }
 
-  // Call Workers AI with streaming enabled
-  const rawStream = await ai.run(model.id || DEFAULT_MODEL_ID, runOptions);
+  // Call Workers AI with streaming enabled, with automatic 5016 license agreement retry
+  let rawStream: any;
+  try {
+    rawStream = await ai.run(model.id || DEFAULT_MODEL_ID, runOptions);
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    if (
+      errMsg.includes("5016") ||
+      errMsg.includes("submit the prompt 'agree'") ||
+      errMsg.includes("Community License")
+    ) {
+      console.log(`Model license agreement required (error 5016) for ${model.id}. Auto-submitting 'agree'...`);
+      await acceptModelAgreement(model.id || DEFAULT_MODEL_ID, options.aiOverride);
+      // Retry the user's inference call now that the agreement has been accepted
+      rawStream = await ai.run(model.id || DEFAULT_MODEL_ID, runOptions);
+    } else {
+      throw err;
+    }
+  }
 
   if (!rawStream || typeof rawStream.getReader !== "function") {
     // Non-streaming fallback if stream returned direct object
