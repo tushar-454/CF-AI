@@ -39,6 +39,7 @@ const ChatRequestSchema = z.object({
             })
         )
         .optional(),
+    createdAt: z.number().optional(),
 })
 
 export async function POST(req: Request) {
@@ -68,6 +69,7 @@ export async function POST(req: Request) {
             contextMode = "conversation",
             attachments = [],
             selectedDocumentIds = [],
+            createdAt,
         } = parsed.data
 
         let conversationId = parsed.data.conversationId
@@ -94,6 +96,7 @@ export async function POST(req: Request) {
 
         // Save user message to D1
         const userMessageId = crypto.randomUUID()
+        const userCreatedAt = createdAt || Date.now()
         await createMessage({
             id: userMessageId,
             conversation_id: conversationId,
@@ -102,6 +105,7 @@ export async function POST(req: Request) {
             model,
             effort,
             attachments,
+            created_at: userCreatedAt,
         })
 
         // Prepare message history based on contextMode
@@ -270,6 +274,7 @@ export async function POST(req: Request) {
                 }
 
                 // Save complete assistant message to D1
+                const assistantCreatedAt = Date.now()
                 await createMessage({
                     id: assistantMessageId,
                     conversation_id: conversationId,
@@ -278,6 +283,7 @@ export async function POST(req: Request) {
                     model,
                     effort,
                     reasoning: fullAssistantReasoning || null,
+                    created_at: assistantCreatedAt,
                 })
 
                 // Notify client completion
@@ -285,6 +291,7 @@ export async function POST(req: Request) {
                     done: true,
                     messageId: assistantMessageId,
                     conversationId,
+                    createdAt: assistantCreatedAt,
                 })
                 await send("[DONE]")
             } catch (streamError: unknown) {

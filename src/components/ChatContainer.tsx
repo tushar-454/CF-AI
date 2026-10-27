@@ -505,6 +505,7 @@ export function ChatContainer() {
     const handleSendMessage = async (text: string, attachments: Attachment[] = []) => {
         if (isStreaming) return
 
+        const promptTimestamp = Date.now()
         const userMessage: Message = {
             id: crypto.randomUUID(),
             conversation_id: activeConversationId || "temp",
@@ -513,7 +514,7 @@ export function ChatContainer() {
             model: selectedModel,
             effort,
             attachments,
-            created_at: Date.now(),
+            created_at: promptTimestamp,
         }
 
         setMessages((prev) => [...prev, userMessage])
@@ -537,6 +538,7 @@ export function ChatContainer() {
                     contextMode,
                     attachments,
                     selectedDocumentIds: activeSelectedDocIds,
+                    createdAt: promptTimestamp,
                 }),
                 signal: controller.signal,
             })
@@ -587,6 +589,7 @@ export function ChatContainer() {
             let accumulatedReasoning = ""
             let serverConversationId = activeConversationId
             let finalMessageId = ""
+            let serverCreatedAt: number | undefined
 
             while (true) {
                 const { done, value } = await reader.read()
@@ -659,6 +662,9 @@ export function ChatContainer() {
                         if (event.messageId) {
                             finalMessageId = event.messageId
                         }
+                        if (event.createdAt) {
+                            serverCreatedAt = Number(event.createdAt)
+                        }
                         if (event.reasoning) {
                             accumulatedReasoning += event.reasoning
                             setStreamingReasoning(accumulatedReasoning)
@@ -685,7 +691,7 @@ export function ChatContainer() {
                 model: selectedModel,
                 effort,
                 reasoning: accumulatedReasoning || undefined,
-                created_at: Date.now(),
+                created_at: serverCreatedAt || Date.now(),
             }
 
             setMessages((prev) => [...prev, assistantMessage])

@@ -5,6 +5,7 @@ export interface SSEEvent {
     done?: boolean
     messageId?: string
     conversationId?: string
+    createdAt?: number
 }
 
 export function formatSSE(data: SSEEvent | string): string {

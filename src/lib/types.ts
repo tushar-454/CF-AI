@@ -67,6 +67,7 @@ export interface ChatRequestBody {
     contextMode?: ContextMode
     attachments?: Attachment[]
     selectedDocumentIds?: string[]
+    createdAt?: number
 }
 
 export interface WorkersAi {

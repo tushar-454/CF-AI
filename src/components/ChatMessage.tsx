@@ -3,6 +3,7 @@
 import React, { useState } from "react"
 import { Message } from "@/lib/types"
 import { MarkdownRenderer } from "./MarkdownRenderer"
+import { MessageTimestamp } from "./MessageTimestamp"
 import {
     BrainIcon,
     CheckIcon,
@@ -102,6 +103,13 @@ export function ChatMessage({ message, isStreaming = false, onRegenerate }: Chat
                         </div>
                     )}
                     <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+
+                    {/* Prompt bottom-left timestamp */}
+                    {message.created_at ? (
+                        <div className="flex items-center justify-start mt-2 pt-1 border-t border-[var(--border)]/40">
+                            <MessageTimestamp timestamp={message.created_at} align="left" />
+                        </div>
+                    ) : null}
                 </div>
             </div>
         )
@@ -173,7 +181,7 @@ export function ChatMessage({ message, isStreaming = false, onRegenerate }: Chat
 
                 {/* Action Toolbar */}
                 {!isStreaming && message.content && (
-                    <div className="flex items-center gap-1.5 sm:gap-2 mt-2.5 sm:mt-3 pt-1">
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mt-2.5 sm:mt-3 pt-1">
                         <button
                             type="button"
                             onClick={handleCopy}
@@ -199,6 +207,12 @@ export function ChatMessage({ message, isStreaming = false, onRegenerate }: Chat
                                 <span>Regenerate</span>
                             </button>
                         )}
+
+                        {message.created_at ? (
+                            <div className="inline-flex items-center pl-2 sm:pl-2.5 border-l border-[var(--border)]/60 my-0.5">
+                                <MessageTimestamp timestamp={message.created_at} align="left" />
+                            </div>
+                        ) : null}
                     </div>
                 )}
             </div>
