@@ -45,7 +45,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
 if (typeof window !== "undefined") {
     const renderer = new marked.Renderer()
 
-    renderer.code = function ({ text, lang }: any) {
+    renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
         const language = lang || "plaintext"
         const encoded = encodeURIComponent(text)
         return `
@@ -65,7 +65,15 @@ if (typeof window !== "undefined") {
     `
     }
 
-    renderer.link = function ({ href, title, text }: any) {
+    renderer.link = function ({
+        href,
+        title,
+        text,
+    }: {
+        href: string
+        title?: string | null
+        text: string
+    }) {
         return `<a href="${href}" ${title ? `title="${title}"` : ""} target="_blank" rel="noopener noreferrer" class="text-[var(--accent)] underline underline-offset-2 hover:opacity-80">${text}</a>`
     }
 

@@ -119,13 +119,11 @@ export async function GET(req: Request) {
         headers.set("Cache-Control", "public, max-age=31536000, immutable")
 
         return new Response(object.body, { headers })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in GET /api/r2:", error)
-        const isBindingError = error?.name === "R2BindingError"
-        return Response.json(
-            { error: error?.message || "Failed to retrieve R2 object", isBindingError },
-            { status: isBindingError ? 503 : 500 }
-        )
+        const isBindingError = error instanceof Error && error.name === "R2BindingError"
+        const msg = error instanceof Error ? error.message : "Failed to retrieve R2 object"
+        return Response.json({ error: msg, isBindingError }, { status: isBindingError ? 503 : 500 })
     }
 }
 
@@ -173,10 +171,8 @@ export async function POST(req: Request) {
             name: fileName,
             mime: mimeType || inferImageMime(resolvedKey),
         })
-    } catch (error: any) {
-        return Response.json(
-            { error: error?.message || "Failed to process R2 request" },
-            { status: 500 }
-        )
+    } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : "Failed to process R2 request"
+        return Response.json({ error: msg }, { status: 500 })
     }
 }

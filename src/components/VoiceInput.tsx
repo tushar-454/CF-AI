@@ -4,6 +4,52 @@ import React, { useState, useRef, useEffect } from "react"
 import { MicIcon, MicOffIcon, RefreshCwIcon } from "./Icons"
 import { getAuthHeaders } from "@/lib/auth-client"
 
+interface SpeechRecognitionResultItem {
+    transcript: string
+    confidence?: number
+}
+
+interface SpeechRecognitionResult {
+    isFinal: boolean
+    length: number
+    [index: number]: SpeechRecognitionResultItem
+}
+
+interface SpeechRecognitionResultList {
+    length: number
+    [index: number]: SpeechRecognitionResult
+}
+
+interface SpeechRecognitionEvent {
+    resultIndex: number
+    results: SpeechRecognitionResultList
+}
+
+interface SpeechRecognitionErrorEvent {
+    error: string
+    message?: string
+}
+
+interface ISpeechRecognition {
+    continuous: boolean
+    interimResults: boolean
+    lang: string
+    onstart: (() => void) | null
+    onresult: ((event: SpeechRecognitionEvent) => void) | null
+    onerror: ((event: SpeechRecognitionErrorEvent) => void) | null
+    onend: (() => void) | null
+    start: () => void
+    stop: () => void
+    abort: () => void
+}
+
+type SpeechRecognitionConstructor = new () => ISpeechRecognition
+
+interface WindowWithSpeechRecognition extends Window {
+    SpeechRecognition?: SpeechRecognitionConstructor
+    webkitSpeechRecognition?: SpeechRecognitionConstructor
+}
+
 interface VoiceInputProps {
     onTranscript: (text: string) => void
     onError: (errorMsg: string) => void
@@ -16,7 +62,7 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
         "speechRecognition"
     )
 
-    const recognitionRef = useRef<any>(null)
+    const recognitionRef = useRef<ISpeechRecognition | null>(null)
     const mediaRecorderRef = useRef<MediaRecorder | null>(null)
     const streamRef = useRef<MediaStream | null>(null)
     const audioChunksRef = useRef<Blob[]>([])
@@ -32,8 +78,8 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
                 return
             }
 
-            const SpeechRecognition =
-                (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+            const win = window as unknown as WindowWithSpeechRecognition
+            const SpeechRecognition = win.SpeechRecognition || win.webkitSpeechRecognition
             if (SpeechRecognition) {
                 setMode("speechRecognition")
             } else if (
@@ -108,7 +154,10 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
                         body: formData,
                     })
 
-                    const data: any = await res.json().catch(() => ({}))
+                    const data = (await res.json().catch(() => ({}))) as {
+                        error?: string
+                        text?: string
+                    }
                     if (!res.ok) {
                         throw new Error(data.error || "Failed to transcribe audio")
                     }
@@ -118,8 +167,12 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
                     } else {
                         onError("No clear speech detected. Please speak closer to the microphone.")
                     }
-                } catch (transcribeErr: any) {
-                    onError(transcribeErr?.message || "Audio transcription failed.")
+                } catch (transcribeErr: unknown) {
+                    const msg =
+                        transcribeErr instanceof Error
+                            ? transcribeErr.message
+                            : "Audio transcription failed."
+                    onError(msg)
                 } finally {
                     setIsTranscribing(false)
                 }
@@ -128,22 +181,24 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
             mediaRecorder.start(250)
             mediaRecorderRef.current = mediaRecorder
             setIsRecording(true)
-        } catch (err: any) {
+        } catch (err: unknown) {
             setIsRecording(false)
             stopTracks()
-            if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+            const errName = err instanceof Error ? err.name : ""
+            const errMsg = err instanceof Error ? err.message : "Unknown error"
+            if (errName === "NotAllowedError" || errName === "PermissionDeniedError") {
                 onError(
                     "Microphone permission denied. Please allow microphone access in your browser settings."
                 )
             } else {
-                onError("Could not access microphone: " + (err.message || "Unknown error"))
+                onError("Could not access microphone: " + errMsg)
             }
         }
     }
 
     const startSpeechRecognition = () => {
-        const SpeechRecognition =
-            (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+        const win = window as unknown as WindowWithSpeechRecognition
+        const SpeechRecognition = win.SpeechRecognition || win.webkitSpeechRecognition
         if (!SpeechRecognition) {
             setMode("mediaRecorder")
             startMediaRecorder()
@@ -160,7 +215,7 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
                 setIsRecording(true)
             }
 
-            recognition.onresult = (event: any) => {
+            recognition.onresult = (event: SpeechRecognitionEvent) => {
                 let finalTranscript = ""
                 for (let i = event.resultIndex; i < event.results.length; ++i) {
                     if (event.results[i].isFinal) {
@@ -172,7 +227,7 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
                 }
             }
 
-            recognition.onerror = (event: any) => {
+            recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
                 console.warn("SpeechRecognition error:", event.error)
                 setIsRecording(false)
 
@@ -200,7 +255,7 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
 
             recognition.start()
             recognitionRef.current = recognition
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.warn("Could not start SpeechRecognition, falling back to MediaRecorder:", err)
             setMode("mediaRecorder")
             localStorage.setItem("cf_ai_voice_mode", "mediaRecorder")
@@ -213,8 +268,6 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
             startSpeechRecognition()
         } else if (mode === "mediaRecorder") {
             startMediaRecorder()
-        } else {
-            onError("Voice input is not supported in this browser.")
         }
     }
 
@@ -222,23 +275,17 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
         if (mode === "speechRecognition" && recognitionRef.current) {
             try {
                 recognitionRef.current.stop()
-            } catch {}
+            } catch {
+                // Ignore if already stopped
+            }
             recognitionRef.current = null
             setIsRecording(false)
-        } else if (mode === "mediaRecorder" && mediaRecorderRef.current) {
-            try {
-                if (mediaRecorderRef.current.state !== "inactive") {
-                    mediaRecorderRef.current.stop()
-                }
-            } catch {}
-            mediaRecorderRef.current = null
-        } else {
-            setIsRecording(false)
+        } else if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+            mediaRecorderRef.current.stop()
         }
     }
 
     const toggleRecording = () => {
-        if (isTranscribing) return
         if (isRecording) {
             stopRecording()
         } else {
@@ -246,29 +293,41 @@ export function VoiceInput({ onTranscript, onError }: VoiceInputProps) {
         }
     }
 
+    if (mode === "unsupported") {
+        return null
+    }
+
     return (
         <button
             type="button"
             onClick={toggleRecording}
             disabled={isTranscribing}
-            className={`p-1.5 rounded-lg text-xs font-medium transition-all ${
-                isTranscribing
-                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-800"
-                    : isRecording
-                      ? "bg-red-500/10 text-red-600 dark:text-red-400 border border-red-300 dark:border-red-800 animate-pulse"
+            className={`p-2 rounded-xl transition-all cursor-pointer ${
+                isRecording
+                    ? "bg-red-500 text-white animate-pulse"
+                    : isTranscribing
+                      ? "bg-[var(--selected-bg)] text-[var(--accent)]"
                       : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)]"
             }`}
             title={
                 isTranscribing
-                    ? "Transcribing audio with Whisper..."
+                    ? "Transcribing audio using Whisper..."
                     : isRecording
-                      ? "Listening... Click to stop and transcribe"
-                      : "Start voice typing (speech-to-text)"
+                      ? "Stop recording"
+                      : mode === "speechRecognition"
+                        ? "Voice input (SpeechRecognition / Whisper)"
+                        : "Voice input (Workers AI Whisper)"
             }
-            aria-label="Voice input"
+            aria-label={
+                isRecording
+                    ? "Stop recording"
+                    : isTranscribing
+                      ? "Transcribing audio"
+                      : "Start voice input"
+            }
         >
             {isTranscribing ? (
-                <RefreshCwIcon size={16} className="animate-spin text-amber-500" />
+                <RefreshCwIcon size={16} className="animate-spin text-[var(--accent)]" />
             ) : isRecording ? (
                 <MicOffIcon size={16} />
             ) : (

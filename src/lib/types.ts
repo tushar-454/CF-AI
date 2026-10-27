@@ -49,6 +49,7 @@ export interface Conversation {
 
 export interface DocumentItem {
     id: string
+    conversation_id?: string | null
     name: string
     r2_key: string
     mime: string
@@ -66,11 +67,92 @@ export interface ChatRequestBody {
     attachments?: Attachment[]
 }
 
+export interface WorkersAi {
+    run: (model: string, inputs: Record<string, unknown> | unknown) => Promise<unknown>
+}
+
+export interface D1PreparedStatement {
+    bind(...values: unknown[]): D1PreparedStatement
+    first<T = Record<string, unknown>>(colName?: string): Promise<T | null>
+    all<T = Record<string, unknown>>(): Promise<{ results: T[]; success: boolean; meta?: unknown }>
+    run(): Promise<{ success: boolean; meta?: unknown }>
+}
+
+export interface D1DatabaseBinding {
+    prepare(query: string): D1PreparedStatement
+    batch(statements: D1PreparedStatement[]): Promise<{ results?: unknown[]; success: boolean }[]>
+    exec(query: string): Promise<{ count: number; duration: number }>
+}
+
+export interface R2ObjectBinding {
+    key: string
+    size: number
+    body: ReadableStream
+    arrayBuffer: () => Promise<ArrayBuffer>
+    text?: () => Promise<string>
+    httpMetadata?: {
+        contentType?: string
+    }
+    customMetadata?: Record<string, string>
+}
+
+export interface R2BucketBinding {
+    get(key: string): Promise<R2ObjectBinding | null>
+    put(
+        key: string,
+        value: ArrayBuffer | ArrayBufferView | ReadableStream | string | Blob,
+        options?: {
+            httpMetadata?: { contentType?: string }
+            customMetadata?: Record<string, string>
+        }
+    ): Promise<unknown>
+    delete(keys: string | string[]): Promise<void>
+    list(options?: { prefix?: string; limit?: number; cursor?: string }): Promise<{
+        objects: Array<{ key: string; size: number }>
+        truncated: boolean
+    }>
+}
+
+export interface VectorizeMatch {
+    id: string
+    score: number
+    values?: number[]
+    metadata?: Record<string, unknown>
+}
+
+export interface VectorizeQueryResult {
+    matches: VectorizeMatch[]
+    count: number
+}
+
+export interface VectorizeIndexBinding {
+    query(
+        vector: number[],
+        options?: { topK?: number; returnMetadata?: string; filter?: Record<string, unknown> }
+    ): Promise<VectorizeQueryResult>
+    upsert(
+        records: Array<{
+            id: string
+            values: number[]
+            metadata?: Record<string, unknown>
+        }>
+    ): Promise<unknown>
+    deleteByIds(ids: string[]): Promise<unknown>
+}
+
 export interface AppEnv {
-    AI?: any
-    DB?: any
-    FILES?: any
-    VECTORIZE?: any
-    ASSETS?: any
-    IMAGES?: any
+    AI?: WorkersAi
+    DB?: D1DatabaseBinding
+    FILES?: R2BucketBinding
+    VECTORIZE?: VectorizeIndexBinding
+    ASSETS?: unknown
+    IMAGES?: unknown
+    APP_PIN?: string
+    R2_BUCKET?: string
+    R2_ACCESS_KEY_ID?: string
+    R2_SECRET_ACCESS_KEY?: string
+    R2_ENDPOINT?: string
+    R2_PUBLIC_URL?: string
+    CLOUDFLARE_ACCOUNT_ID?: string
+    CLOUDFLARE_API_TOKEN?: string
 }

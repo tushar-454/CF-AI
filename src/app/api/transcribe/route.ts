@@ -34,12 +34,10 @@ export async function POST(req: Request) {
 
         const text = await transcribeAudio(audioBytes)
         return Response.json({ text })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in POST /api/transcribe:", error)
-        const isBindingError = error?.name === "AiBindingError"
-        return Response.json(
-            { error: error?.message || "Transcription failed", isBindingError },
-            { status: isBindingError ? 503 : 500 }
-        )
+        const isBindingError = error instanceof Error && error.name === "AiBindingError"
+        const msg = error instanceof Error ? error.message : "Transcription failed"
+        return Response.json({ error: msg, isBindingError }, { status: isBindingError ? 503 : 500 })
     }
 }

@@ -50,11 +50,12 @@ export async function GET(req: Request) {
             currentUsage: summary,
             modelsCatalog: catalogPricing,
         })
-    } catch (err: any) {
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Failed to retrieve usage stats"
         return NextResponse.json(
             {
                 status: "error",
-                error: err.message || "Failed to retrieve usage stats",
+                error: msg,
             },
             { status: 500 }
         )

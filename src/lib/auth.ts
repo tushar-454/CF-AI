@@ -1,35 +1,40 @@
 // Application authentication configuration
 // 4-digit PIN for access control retrieved from Cloudflare Worker request context/env
 import { env as workersEnv } from "cloudflare:workers"
-
+import { AppEnv } from "./types"
 import { AUTH_HEADER_NAME } from "./auth-client"
 export * from "./auth-client"
+
+interface RequestOrContextWithEnv {
+    env?: Record<string, unknown>
+    context?: { env?: Record<string, unknown> }
+    cloudflare?: { env?: Record<string, unknown> }
+}
 
 /**
  * Extract Cloudflare environment bindings from Request, Context, or ambient workers runtime.
  * Never relies on process.env in production Cloudflare runtime.
  */
-export function getRequestContextEnv(
-    reqOrContext?: any
-): Cloudflare.Env | Record<string, any> | undefined {
-    if (reqOrContext) {
+export function getRequestContextEnv(reqOrContext?: unknown): Record<string, unknown> | undefined {
+    if (reqOrContext && typeof reqOrContext === "object") {
+        const obj = reqOrContext as RequestOrContextWithEnv
         // 1. Direct env on request (e.g. req.env)
-        if (reqOrContext.env && typeof reqOrContext.env === "object") {
-            return reqOrContext.env
+        if (obj.env && typeof obj.env === "object") {
+            return obj.env
         }
         // 2. Context env (e.g. context.env or req.context.env)
-        if (reqOrContext.context?.env && typeof reqOrContext.context.env === "object") {
-            return reqOrContext.context.env
+        if (obj.context?.env && typeof obj.context.env === "object") {
+            return obj.context.env
         }
         // 3. Cloudflare context bridge (e.g. req.cloudflare?.env)
-        if (reqOrContext.cloudflare?.env && typeof reqOrContext.cloudflare.env === "object") {
-            return reqOrContext.cloudflare.env
+        if (obj.cloudflare?.env && typeof obj.cloudflare.env === "object") {
+            return obj.cloudflare.env
         }
     }
 
     // 4. Global workers ambient env from "cloudflare:workers"
     if (typeof workersEnv !== "undefined" && workersEnv) {
-        return workersEnv
+        return workersEnv as unknown as Record<string, unknown>
     }
 
     return undefined
@@ -38,9 +43,9 @@ export function getRequestContextEnv(
 /**
  * Get configured APP_PIN from request/context environment without using hardcoded fallbacks.
  */
-export function getAppPin(reqOrContext?: any): string | undefined {
+export function getAppPin(reqOrContext?: unknown): string | undefined {
     const envObj = getRequestContextEnv(reqOrContext)
-    const pin = (envObj as any)?.APP_PIN
+    const pin = (envObj as AppEnv | undefined)?.APP_PIN
     if (typeof pin === "string" && pin.trim().length > 0) {
         return pin.trim()
     }
@@ -49,8 +54,8 @@ export function getAppPin(reqOrContext?: any): string | undefined {
 
 // Backward compatibility export (falls back to workersEnv)
 export const APP_PIN: string | undefined =
-    typeof workersEnv !== "undefined" && (workersEnv as any)?.APP_PIN
-        ? (workersEnv as any).APP_PIN
+    typeof workersEnv !== "undefined" && (workersEnv as unknown as AppEnv)?.APP_PIN
+        ? (workersEnv as unknown as AppEnv).APP_PIN
         : undefined
 
 /**
@@ -63,10 +68,10 @@ export const APP_PIN: string | undefined =
  */
 export function verifyPin(
     pinOrReq: string | null | undefined | Request,
-    reqOrContext?: any
+    reqOrContext?: unknown
 ): boolean {
     let pin: string | null | undefined
-    let context: any
+    let context: unknown
 
     if (pinOrReq && typeof pinOrReq === "object" && "headers" in pinOrReq) {
         // Called with Request object directly: verifyPin(req)

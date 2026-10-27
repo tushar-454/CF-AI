@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers"
 import { EMBEDDING_MODEL_ID } from "./models"
+import { AppEnv, VectorizeIndexBinding, VectorizeMatch, WorkersAi } from "./types"
 
 export class VectorizeBindingError extends Error {
     constructor(
@@ -10,8 +11,9 @@ export class VectorizeBindingError extends Error {
     }
 }
 
-export function getVectorize(override?: any): any {
-    const index = override || (env as any)?.VECTORIZE
+export function getVectorize(override?: unknown): VectorizeIndexBinding {
+    const appEnv = env as unknown as AppEnv
+    const index = (override as VectorizeIndexBinding) || appEnv.VECTORIZE
     if (!index || typeof index.query !== "function") {
         throw new VectorizeBindingError()
     }
@@ -74,7 +76,7 @@ export function chunkText(text: string, chunkSize: number = 800, overlap: number
 /**
  * Embed an array of texts in batches using @cf/baai/bge-base-en-v1.5
  */
-export async function getEmbeddings(ai: any, texts: string[]): Promise<number[][]> {
+export async function getEmbeddings(ai: WorkersAi, texts: string[]): Promise<number[][]> {
     if (!ai || typeof ai.run !== "function") {
         throw new Error("Workers AI binding (AI) is missing or unavailable.")
     }
@@ -85,7 +87,9 @@ export async function getEmbeddings(ai: any, texts: string[]): Promise<number[][
 
     for (let i = 0; i < texts.length; i += batchSize) {
         const batch = texts.slice(i, i + batchSize)
-        const result = await ai.run(EMBEDDING_MODEL_ID, { text: batch })
+        const result = (await ai.run(EMBEDDING_MODEL_ID, { text: batch })) as {
+            data?: number[][]
+        } | null
         if (result && Array.isArray(result.data)) {
             allVectors.push(...result.data)
         } else {
@@ -100,11 +104,12 @@ export async function getEmbeddings(ai: any, texts: string[]): Promise<number[][
  * Chunk, embed, and upsert a document into Vectorize.
  */
 export async function indexDocument(
-    ai: any,
-    vectorize: any,
+    ai: WorkersAi,
+    vectorize: VectorizeIndexBinding,
     documentId: string,
     docName: string,
-    content: string
+    content: string,
+    conversationId?: string | null
 ): Promise<{ chunksIndexed: number }> {
     const chunks = chunkText(content)
     if (chunks.length === 0) {
@@ -118,6 +123,7 @@ export async function indexDocument(
         values: vectors[index],
         metadata: {
             documentId,
+            conversationId: conversationId || "",
             name: docName,
             chunkIndex: index,
             text: chunk.slice(0, 500), // Keep a snippet for quick display if needed
@@ -137,6 +143,7 @@ export async function indexDocument(
 export interface RetrievedChunk {
     score: number
     documentId: string
+    conversationId?: string
     name: string
     chunkIndex: number
     text: string
@@ -146,8 +153,8 @@ export interface RetrievedChunk {
  * Query Vectorize using query text embedded with BGE model.
  */
 export async function queryKnowledge(
-    ai: any,
-    vectorize: any,
+    ai: WorkersAi,
+    vectorize: VectorizeIndexBinding,
     query: string,
     topK: number = 5
 ): Promise<RetrievedChunk[]> {
@@ -166,9 +173,10 @@ export async function queryKnowledge(
         return []
     }
 
-    return searchResult.matches.map((m: any) => ({
+    return searchResult.matches.map((m: VectorizeMatch) => ({
         score: m.score,
         documentId: String(m.metadata?.documentId || ""),
+        conversationId: String(m.metadata?.conversationId || ""),
         name: String(m.metadata?.name || "Document"),
         chunkIndex: Number(m.metadata?.chunkIndex || 0),
         text: String(m.metadata?.text || ""),
@@ -179,7 +187,7 @@ export async function queryKnowledge(
  * Delete vectors associated with a document.
  */
 export async function deleteDocumentVectors(
-    vectorize: any,
+    vectorize: VectorizeIndexBinding,
     documentId: string,
     maxChunks: number = 200
 ): Promise<void> {

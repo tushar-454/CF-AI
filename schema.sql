@@ -24,10 +24,14 @@ CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation
 
 CREATE TABLE IF NOT EXISTS documents (
   id TEXT PRIMARY KEY,
+  conversation_id TEXT,
   name TEXT NOT NULL,
   r2_key TEXT NOT NULL,
   mime TEXT NOT NULL,
   size INTEGER NOT NULL,
   status TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_documents_conversation_id ON documents(conversation_id);

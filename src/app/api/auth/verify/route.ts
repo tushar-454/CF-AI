@@ -25,11 +25,9 @@ export async function POST(req: Request) {
         }
 
         return Response.json({ valid: true })
-    } catch (error: any) {
-        return Response.json(
-            { valid: false, error: error?.message || "Verification failed" },
-            { status: 500 }
-        )
+    } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : "Verification failed"
+        return Response.json({ valid: false, error: msg }, { status: 500 })
     }
 }
 

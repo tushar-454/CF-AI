@@ -30,13 +30,11 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
             ...conversation,
             messages,
         })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in GET /api/conversations/[id]:", error)
-        const isBindingError = error?.name === "DatabaseBindingError"
-        return Response.json(
-            { error: error?.message || "Failed to load conversation", isBindingError },
-            { status: isBindingError ? 503 : 500 }
-        )
+        const isBindingError = error instanceof Error && error.name === "DatabaseBindingError"
+        const msg = error instanceof Error ? error.message : "Failed to load conversation"
+        return Response.json({ error: msg, isBindingError }, { status: isBindingError ? 503 : 500 })
     }
 }
 
@@ -63,13 +61,11 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
 
         await updateConversationTitle(id, parsed.data.title)
         return Response.json({ success: true, title: parsed.data.title })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in PATCH /api/conversations/[id]:", error)
-        const isBindingError = error?.name === "DatabaseBindingError"
-        return Response.json(
-            { error: error?.message || "Failed to update conversation", isBindingError },
-            { status: isBindingError ? 503 : 500 }
-        )
+        const isBindingError = error instanceof Error && error.name === "DatabaseBindingError"
+        const msg = error instanceof Error ? error.message : "Failed to update conversation"
+        return Response.json({ error: msg, isBindingError }, { status: isBindingError ? 503 : 500 })
     }
 }
 
@@ -86,12 +82,10 @@ export async function DELETE(req: Request, context: { params: Promise<{ id: stri
         const { id } = await context.params
         await deleteConversation(id)
         return Response.json({ success: true, deletedId: id })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in DELETE /api/conversations/[id]:", error)
-        const isBindingError = error?.name === "DatabaseBindingError"
-        return Response.json(
-            { error: error?.message || "Failed to delete conversation", isBindingError },
-            { status: isBindingError ? 503 : 500 }
-        )
+        const isBindingError = error instanceof Error && error.name === "DatabaseBindingError"
+        const msg = error instanceof Error ? error.message : "Failed to delete conversation"
+        return Response.json({ error: msg, isBindingError }, { status: isBindingError ? 503 : 500 })
     }
 }

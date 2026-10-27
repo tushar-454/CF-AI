@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers"
-import { Attachment, EffortLevel } from "./types"
+import { AppEnv, Attachment, EffortLevel, R2BucketBinding, WorkersAi } from "./types"
 import { DEFAULT_MODEL_ID, getModel, TRANSCRIPTION_MODEL_ID } from "./models"
 
 export class AiBindingError extends Error {
@@ -18,16 +18,18 @@ export class R2BindingError extends Error {
     }
 }
 
-export function getAi(override?: any): any {
-    const ai = override || (env as any)?.AI
+export function getAi(override?: unknown): WorkersAi {
+    const appEnv = env as unknown as AppEnv
+    const ai = (override as WorkersAi) || appEnv.AI
     if (!ai || typeof ai.run !== "function") {
         throw new AiBindingError()
     }
     return ai
 }
 
-export function getR2(override?: any): any {
-    const r2 = override || (env as any)?.FILES
+export function getR2(override?: unknown): R2BucketBinding {
+    const appEnv = env as unknown as AppEnv
+    const r2 = (override as R2BucketBinding) || appEnv.FILES
     if (!r2 || typeof r2.get !== "function") {
         throw new R2BindingError()
     }
@@ -70,7 +72,10 @@ export function getEffortConfig(effort: EffortLevel = "medium"): EffortConfig {
  * Automatically submit required license agreement for gated models (e.g. Meta Llama 3.2 Vision)
  * Cloudflare error 5016 requires submitting the prompt 'agree' once per account.
  */
-export async function acceptModelAgreement(modelId: string, aiOverride?: any): Promise<boolean> {
+export async function acceptModelAgreement(
+    modelId: string,
+    aiOverride?: unknown
+): Promise<boolean> {
     const ai = getAi(aiOverride)
     try {
         await ai.run(modelId, { prompt: "agree" })
@@ -81,8 +86,9 @@ export async function acceptModelAgreement(modelId: string, aiOverride?: any): P
             await ai.run(modelId, { messages: [{ role: "user", content: "agree" }] })
             console.log(`Accepted license agreement for model via messages: ${modelId}`)
             return true
-        } catch (err2: any) {
-            console.warn(`Could not submit 'agree' to model ${modelId}:`, err2?.message || err2)
+        } catch (err2: unknown) {
+            const msg = err2 instanceof Error ? err2.message : String(err2)
+            console.warn(`Could not submit 'agree' to model ${modelId}:`, msg)
             return false
         }
     }
@@ -93,7 +99,7 @@ export async function acceptModelAgreement(modelId: string, aiOverride?: any): P
  */
 export async function transcribeAudio(
     audioBytes: ArrayBuffer | Uint8Array,
-    aiOverride?: any
+    aiOverride?: unknown
 ): Promise<string> {
     const ai = getAi(aiOverride)
     const uint8 = audioBytes instanceof Uint8Array ? audioBytes : new Uint8Array(audioBytes)
@@ -103,19 +109,20 @@ export async function transcribeAudio(
     const audioArray = Array.from(uint8)
 
     try {
-        const response = await ai.run(TRANSCRIPTION_MODEL_ID, {
+        const response = (await ai.run(TRANSCRIPTION_MODEL_ID, {
             audio: audioArray,
-        })
+        })) as { text?: string } | null
         return response?.text || ""
-    } catch (err: any) {
+    } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err)
         console.warn(
             "Primary Whisper transcription failed, attempting whisper-large-v3-turbo fallback:",
-            err?.message
+            errMsg
         )
         try {
-            const response = await ai.run("@cf/openai/whisper-large-v3-turbo", {
+            const response = (await ai.run("@cf/openai/whisper-large-v3-turbo", {
                 audio: audioArray,
-            })
+            })) as { text?: string } | null
             return response?.text || ""
         } catch {
             throw err
@@ -133,8 +140,8 @@ export async function* streamChat(
         effort?: EffortLevel
         attachments?: Attachment[]
         systemPrompt?: string
-        aiOverride?: any
-        r2Override?: any
+        aiOverride?: unknown
+        r2Override?: unknown
     } = {}
 ): AsyncGenerator<
     { delta?: string; reasoning?: string; isDone?: boolean },
@@ -166,7 +173,7 @@ export async function* streamChat(
         })
     }
 
-    const runOptions: Record<string, any> = {
+    const runOptions: Record<string, unknown> = {
         messages: fullMessages,
         stream: true,
         temperature: effortConfig.temperature,
@@ -194,11 +201,11 @@ export async function* streamChat(
     }
 
     // Call Workers AI with streaming enabled, with automatic 5016 license agreement retry
-    let rawStream: any
+    let rawStream: unknown
     try {
         rawStream = await ai.run(model.id || DEFAULT_MODEL_ID, runOptions)
-    } catch (err: any) {
-        const errMsg = err?.message || String(err)
+    } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err)
         if (
             errMsg.includes("5016") ||
             errMsg.includes("submit the prompt 'agree'") ||
@@ -215,15 +222,18 @@ export async function* streamChat(
         }
     }
 
-    if (!rawStream || typeof rawStream.getReader !== "function") {
+    if (!rawStream || typeof (rawStream as ReadableStream).getReader !== "function") {
         // Non-streaming fallback if stream returned direct object
-        const text =
-            (rawStream as any)?.response || (rawStream as any)?.choices?.[0]?.message?.content || ""
+        const fallbackObj = rawStream as {
+            response?: string
+            choices?: Array<{ message?: { content?: string } }>
+        }
+        const text = fallbackObj?.response || fallbackObj?.choices?.[0]?.message?.content || ""
         yield { delta: text }
         return { fullContent: text, fullReasoning: "" }
     }
 
-    const reader = rawStream.getReader()
+    const reader = (rawStream as ReadableStream).getReader()
     const decoder = new TextDecoder()
 
     let fullContent = ""

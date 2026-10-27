@@ -12,7 +12,6 @@ import {
     FileTextIcon,
     ImageIcon,
     RefreshCwIcon,
-    SparklesIcon,
 } from "./Icons"
 
 interface ChatMessageProps {

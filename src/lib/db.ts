@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers"
-import { Conversation, DocumentItem, Message } from "./types"
+import { AppEnv, Conversation, D1DatabaseBinding, DocumentItem, Message } from "./types"
 
 export class DatabaseBindingError extends Error {
     constructor(
@@ -10,28 +10,27 @@ export class DatabaseBindingError extends Error {
     }
 }
 
-export function getDb(override?: any): any {
-    const db = override || (env as any)?.DB
+export function getDb(override?: unknown): D1DatabaseBinding {
+    const appEnv = env as unknown as AppEnv
+    const db = (override as D1DatabaseBinding) || appEnv.DB
     if (!db || typeof db.prepare !== "function") {
         throw new DatabaseBindingError()
     }
     return db
 }
 
-export async function listConversations(dbOverride?: any): Promise<Conversation[]> {
+export async function listConversations(dbOverride?: unknown): Promise<Conversation[]> {
     const db = getDb(dbOverride)
     try {
         const { results } = await db
             .prepare(
                 "SELECT id, title, model, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
             )
-            .all()
-        return (results as any[]) || []
-    } catch (err: any) {
-        if (
-            err?.message?.includes("no such table") ||
-            err?.message?.includes("REPLACE_WITH_D1_ID")
-        ) {
+            .all<Conversation>()
+        return results || []
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such table") || msg.includes("REPLACE_WITH_D1_ID")) {
             throw new DatabaseBindingError(
                 "D1 database tables are not initialized or database ID is a placeholder. Please run migrations."
             )
@@ -40,20 +39,23 @@ export async function listConversations(dbOverride?: any): Promise<Conversation[
     }
 }
 
-export async function getConversation(id: string, dbOverride?: any): Promise<Conversation | null> {
+export async function getConversation(
+    id: string,
+    dbOverride?: unknown
+): Promise<Conversation | null> {
     const db = getDb(dbOverride)
     const conv = await db
         .prepare("SELECT id, title, model, created_at, updated_at FROM conversations WHERE id = ?")
         .bind(id)
-        .first()
-    return (conv as unknown as Conversation) || null
+        .first<Conversation>()
+    return conv || null
 }
 
 export async function createConversation(
     id: string,
     title: string,
     model: string,
-    dbOverride?: any
+    dbOverride?: unknown
 ): Promise<Conversation> {
     const db = getDb(dbOverride)
     const now = Date.now()
@@ -69,7 +71,7 @@ export async function createConversation(
 export async function updateConversationTitle(
     id: string,
     title: string,
-    dbOverride?: any
+    dbOverride?: unknown
 ): Promise<void> {
     const db = getDb(dbOverride)
     const now = Date.now()
@@ -79,24 +81,43 @@ export async function updateConversationTitle(
         .run()
 }
 
-export async function touchConversation(id: string, dbOverride?: any): Promise<void> {
+export async function touchConversation(id: string, dbOverride?: unknown): Promise<void> {
     const db = getDb(dbOverride)
     const now = Date.now()
     await db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").bind(now, id).run()
 }
 
-export async function deleteConversation(id: string, dbOverride?: any): Promise<void> {
+export async function deleteConversation(id: string, dbOverride?: unknown): Promise<void> {
     const db = getDb(dbOverride)
-    await db.batch([
-        db.prepare("DELETE FROM messages WHERE conversation_id = ?").bind(id),
-        db.prepare("DELETE FROM conversations WHERE id = ?").bind(id),
-    ])
+    try {
+        await db.batch([
+            db.prepare("DELETE FROM messages WHERE conversation_id = ?").bind(id),
+            db.prepare("DELETE FROM documents WHERE conversation_id = ?").bind(id),
+            db.prepare("DELETE FROM conversations WHERE id = ?").bind(id),
+        ])
+    } catch {
+        await db.batch([
+            db.prepare("DELETE FROM messages WHERE conversation_id = ?").bind(id),
+            db.prepare("DELETE FROM conversations WHERE id = ?").bind(id),
+        ])
+    }
+}
+
+interface RawDbMessage {
+    id: string
+    conversation_id: string
+    role: "user" | "assistant" | "system"
+    content: string
+    model?: string | null
+    effort?: Message["effort"] | null
+    attachments?: string | null
+    created_at: number
 }
 
 export async function getMessages(
     conversationId: string,
     limit: number = 50,
-    dbOverride?: any
+    dbOverride?: unknown
 ): Promise<Message[]> {
     const db = getDb(dbOverride)
     const { results } = await db
@@ -104,9 +125,9 @@ export async function getMessages(
             "SELECT id, conversation_id, role, content, model, effort, attachments, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ?"
         )
         .bind(conversationId, limit)
-        .all()
+        .all<RawDbMessage>()
 
-    return ((results as any[]) || []).map((row) => ({
+    return (results || []).map((row) => ({
         ...row,
         attachments: row.attachments ? JSON.parse(row.attachments) : null,
     }))
@@ -114,7 +135,7 @@ export async function getMessages(
 
 export async function createMessage(
     msg: Omit<Message, "created_at"> & { created_at?: number },
-    dbOverride?: any
+    dbOverride?: unknown
 ): Promise<Message> {
     const db = getDb(dbOverride)
     const now = msg.created_at || Date.now()
@@ -144,40 +165,120 @@ export async function createMessage(
     }
 }
 
-export async function listDocuments(dbOverride?: any): Promise<DocumentItem[]> {
+export async function listDocuments(
+    conversationId?: string | null,
+    dbOverride?: unknown
+): Promise<DocumentItem[]> {
     const db = getDb(dbOverride)
-    const { results } = await db
-        .prepare(
-            "SELECT id, name, r2_key, mime, size, status, created_at FROM documents ORDER BY created_at DESC"
-        )
-        .all()
-    return (results as any[]) || []
+    try {
+        if (conversationId === undefined) {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents ORDER BY created_at DESC"
+                )
+                .all<DocumentItem>()
+            return results || []
+        } else if (conversationId === null) {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents WHERE conversation_id IS NULL OR conversation_id = '' ORDER BY created_at DESC"
+                )
+                .all<DocumentItem>()
+            return results || []
+        } else {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents WHERE conversation_id = ? ORDER BY created_at DESC"
+                )
+                .bind(conversationId)
+                .all<DocumentItem>()
+            return results || []
+        }
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such column: conversation_id")) {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, name, r2_key, mime, size, status, created_at FROM documents ORDER BY created_at DESC"
+                )
+                .all<DocumentItem>()
+            return (results || []).map((row) => ({ ...row, conversation_id: null }))
+        }
+        throw err
+    }
 }
 
-export async function createDocument(doc: DocumentItem, dbOverride?: any): Promise<void> {
+export async function createDocument(doc: DocumentItem, dbOverride?: unknown): Promise<void> {
     const db = getDb(dbOverride)
-    await db
-        .prepare(
-            "INSERT INTO documents (id, name, r2_key, mime, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(doc.id, doc.name, doc.r2_key, doc.mime, doc.size, doc.status, doc.created_at)
-        .run()
+    try {
+        await db
+            .prepare(
+                "INSERT INTO documents (id, conversation_id, name, r2_key, mime, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(
+                doc.id,
+                doc.conversation_id || null,
+                doc.name,
+                doc.r2_key,
+                doc.mime,
+                doc.size,
+                doc.status,
+                doc.created_at
+            )
+            .run()
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (
+            msg.includes("has no column named conversation_id") ||
+            msg.includes("table documents has no column")
+        ) {
+            await db
+                .prepare(
+                    "INSERT INTO documents (id, name, r2_key, mime, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(doc.id, doc.name, doc.r2_key, doc.mime, doc.size, doc.status, doc.created_at)
+                .run()
+            return
+        }
+        throw err
+    }
 }
 
-export async function getDocument(id: string, dbOverride?: any): Promise<DocumentItem | null> {
+export async function getDocument(id: string, dbOverride?: unknown): Promise<DocumentItem | null> {
     const db = getDb(dbOverride)
-    const doc = await db
-        .prepare(
-            "SELECT id, name, r2_key, mime, size, status, created_at FROM documents WHERE id = ?"
-        )
-        .bind(id)
-        .first()
-    return (doc as unknown as DocumentItem) || null
+    try {
+        const doc = await db
+            .prepare(
+                "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents WHERE id = ?"
+            )
+            .bind(id)
+            .first<DocumentItem>()
+        return doc || null
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such column: conversation_id")) {
+            const doc = await db
+                .prepare(
+                    "SELECT id, name, r2_key, mime, size, status, created_at FROM documents WHERE id = ?"
+                )
+                .bind(id)
+                .first<DocumentItem>()
+            return doc ? { ...doc, conversation_id: null } : null
+        }
+        throw err
+    }
 }
 
-export async function deleteDocument(id: string, dbOverride?: any): Promise<void> {
+export async function deleteDocument(id: string, dbOverride?: unknown): Promise<void> {
     const db = getDb(dbOverride)
     await db.prepare("DELETE FROM documents WHERE id = ?").bind(id).run()
+}
+
+export async function deleteDocuments(ids: string[], dbOverride?: unknown): Promise<void> {
+    if (!ids || ids.length === 0) return
+    const db = getDb(dbOverride)
+    const statements = ids.map((id) => db.prepare("DELETE FROM documents WHERE id = ?").bind(id))
+    await db.batch(statements)
 }
 
 export interface ModelUsageBreakdown {
@@ -248,35 +349,24 @@ export const MODEL_NEURON_RATES: Record<
     // Reasoning
     "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b": {
         inputRate: 100000,
-        outputRate: 400000,
-        requiredPlan: "Free",
+        outputRate: 500000,
+        requiredPlan: "Paid",
     },
-    "@cf/qwen/qwq-32b": { inputRate: 100000, outputRate: 400000, requiredPlan: "Free" },
-    "@cf/openai/gpt-oss-20b": { inputRate: 80000, outputRate: 350000, requiredPlan: "Free" },
-
-    // Coding
     "@cf/qwen/qwen2.5-coder-32b-instruct": {
-        inputRate: 100000,
-        outputRate: 400000,
-        requiredPlan: "Free",
+        inputRate: 90000,
+        outputRate: 450000,
+        requiredPlan: "Paid",
     },
 
     // Vision
     "@cf/meta/llama-3.2-11b-vision-instruct": {
-        inputRate: 60000,
-        outputRate: 300000,
-        requiredPlan: "Free",
-    },
-
-    // Historic / Reference
-    "@cf/meta/llama-3.3-70b-instruct-fp8-fast": {
-        inputRate: 200000,
-        outputRate: 700000,
+        inputRate: 80000,
+        outputRate: 400000,
         requiredPlan: "Paid",
     },
 }
 
-export async function getUsageMetrics(dbOverride?: any): Promise<DailyUsageSummary> {
+export async function getUsageMetrics(dbOverride?: unknown): Promise<DailyUsageSummary> {
     const db = getDb(dbOverride)
     const now = new Date()
     const todayUtcMidnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
@@ -288,13 +378,17 @@ export async function getUsageMetrics(dbOverride?: any): Promise<DailyUsageSumma
             "SELECT role, content, model, created_at FROM messages WHERE created_at >= ? ORDER BY created_at ASC"
         )
         .bind(todayUtcMidnight)
-        .all()
+        .all<{ role?: string; content?: string; model?: string; created_at?: number }>()
 
     // Fetch all time counts
-    const totalMsgsRow = await db.prepare("SELECT COUNT(*) as count FROM messages").first()
+    const totalMsgsRow = await db
+        .prepare("SELECT COUNT(*) as count FROM messages")
+        .first<{ count: number }>()
     const allTimeMessages = Number(totalMsgsRow?.count || 0)
 
-    const totalDocsRow = await db.prepare("SELECT COUNT(*) as count FROM documents").first()
+    const totalDocsRow = await db
+        .prepare("SELECT COUNT(*) as count FROM documents")
+        .first<{ count: number }>()
     const allTimeDocuments = Number(totalDocsRow?.count || 0)
 
     const byModel: Record<string, ModelUsageBreakdown> = {}
@@ -303,7 +397,7 @@ export async function getUsageMetrics(dbOverride?: any): Promise<DailyUsageSumma
     let estimatedNeuronsUsedToday = 0
     let totalRequestsToday = 0
 
-    for (const row of (todayMessages as any[]) || []) {
+    for (const row of todayMessages || []) {
         const model = row.model || "@cf/meta/llama-3.1-8b-instruct"
         const rates = MODEL_NEURON_RATES[model] || {
             inputRate: 50000,
@@ -330,36 +424,28 @@ export async function getUsageMetrics(dbOverride?: any): Promise<DailyUsageSumma
             byModel[model].requests += 1
             byModel[model].outputTokens += estTokens
             totalOutputTokensToday += estTokens
-            const neurons = (estTokens / 1_000_000) * rates.outputRate
-            byModel[model].estimatedNeurons += neurons
-            estimatedNeuronsUsedToday += neurons
-        } else if (row.role === "user") {
+            // Output tokens neuron cost: (tokens / 1,000,000) * outputRate
+            const neuronCost = Math.round((estTokens / 1000000) * rates.outputRate)
+            byModel[model].estimatedNeurons += neuronCost
+            estimatedNeuronsUsedToday += neuronCost
+        } else {
             byModel[model].inputTokens += estTokens
             totalInputTokensToday += estTokens
-            const neurons = (estTokens / 1_000_000) * rates.inputRate
-            byModel[model].estimatedNeurons += neurons
-            estimatedNeuronsUsedToday += neurons
+            const neuronCost = Math.round((estTokens / 1000000) * rates.inputRate)
+            byModel[model].estimatedNeurons += neuronCost
+            estimatedNeuronsUsedToday += neuronCost
         }
     }
 
-    // Round estimated neurons
-    estimatedNeuronsUsedToday = Math.round(estimatedNeuronsUsedToday * 100) / 100
-    for (const m of Object.keys(byModel)) {
-        byModel[m].estimatedNeurons = Math.round(byModel[m].estimatedNeurons * 100) / 100
-    }
-
     const dailyFreeNeuronsLimit = 10000
-    const remainingNeuronsToday = Math.max(
-        0,
-        Math.round((dailyFreeNeuronsLimit - estimatedNeuronsUsedToday) * 100) / 100
-    )
+    const remainingNeuronsToday = Math.max(0, dailyFreeNeuronsLimit - estimatedNeuronsUsedToday)
     const percentUsed = Math.min(
         100,
         Math.round((estimatedNeuronsUsedToday / dailyFreeNeuronsLimit) * 100)
     )
 
     return {
-        dateUtc: new Date(todayUtcMidnight).toISOString().slice(0, 10),
+        dateUtc: new Date(todayUtcMidnight).toISOString().split("T")[0],
         resetAtUtc,
         dailyFreeNeuronsLimit,
         estimatedNeuronsUsedToday,

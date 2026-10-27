@@ -1,11 +1,12 @@
-import { z } from "zod"
-import { createConversation, createMessage, getConversation, getMessages } from "@/lib/db"
 import { acceptModelAgreement, streamChat } from "@/lib/ai"
-import { createSSEStream, SSE_HEADERS } from "@/lib/sse"
-import { queryKnowledge } from "@/lib/rag"
-import { DEFAULT_MODEL_ID } from "@/lib/models"
-import { env } from "cloudflare:workers"
 import { verifyPin } from "@/lib/auth"
+import { createConversation, createMessage, getConversation, getMessages } from "@/lib/db"
+import { DEFAULT_MODEL_ID } from "@/lib/models"
+import { queryKnowledge } from "@/lib/rag"
+import { createSSEStream, SSE_HEADERS } from "@/lib/sse"
+import { AppEnv } from "@/lib/types"
+import { env } from "cloudflare:workers"
+import { z } from "zod"
 
 const ChatRequestSchema = z.object({
     conversationId: z.string().optional(),
@@ -128,19 +129,33 @@ export async function POST(req: Request) {
         let ragSystemPrompt = ""
         if (contextMode === "knowledge") {
             try {
-                const ai = (env as any)?.AI
-                const vectorize = (env as any)?.VECTORIZE
+                const appEnv = env as unknown as AppEnv
+                const ai = appEnv.AI
+                const vectorize = appEnv.VECTORIZE
                 if (ai && vectorize) {
-                    const chunks = await queryKnowledge(ai, vectorize, message, 5)
-                    if (chunks.length > 0) {
-                        const contextText = chunks
+                    const rawChunks = await queryKnowledge(ai, vectorize, message, 8)
+                    // Prioritize chat-specific knowledge, then global knowledge, exclude other chats
+                    const filteredChunks = rawChunks.filter(
+                        (c) => !c.conversationId || c.conversationId === conversationId
+                    )
+                    // Sort: conversation-specific chunks first, then by score
+                    filteredChunks.sort((a, b) => {
+                        const aIsChat = a.conversationId === conversationId ? 1 : 0
+                        const bIsChat = b.conversationId === conversationId ? 1 : 0
+                        if (aIsChat !== bIsChat) return bIsChat - aIsChat
+                        return b.score - a.score
+                    })
+                    const topChunks = filteredChunks.slice(0, 5)
+                    if (topChunks.length > 0) {
+                        const contextText = topChunks
                             .map((c, i) => `[Document ${i + 1}: ${c.name}]\n${c.text}`)
                             .join("\n\n")
                         ragSystemPrompt = `You have access to the following relevant reference materials from the knowledge base:\n\n${contextText}\n\nUse this information to answer the user accurately and cite the source document name when appropriate.`
                     }
                 }
-            } catch (err: any) {
-                console.warn("RAG query failed or Vectorize not configured:", err?.message)
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err)
+                console.warn("RAG query failed or Vectorize not configured:", msg)
             }
         }
 
@@ -197,9 +212,12 @@ export async function POST(req: Request) {
                     conversationId,
                 })
                 await send("[DONE]")
-            } catch (streamError: any) {
+            } catch (streamError: unknown) {
                 console.error("Stream error in /api/chat:", streamError)
-                const errMsg = streamError?.message || "An error occurred during inference"
+                const errMsg =
+                    streamError instanceof Error
+                        ? streamError.message
+                        : "An error occurred during inference"
                 if (
                     errMsg.includes("5016") ||
                     errMsg.includes("submit the prompt 'agree'") ||
@@ -220,16 +238,19 @@ export async function POST(req: Request) {
         return new Response(readable, {
             headers: SSE_HEADERS,
         })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in /api/chat:", error)
         const isBindingError =
-            error?.name === "DatabaseBindingError" ||
-            error?.name === "AiBindingError" ||
-            error?.message?.includes("REPLACE_WITH_")
+            error instanceof Error &&
+            (error.name === "DatabaseBindingError" ||
+                error.name === "AiBindingError" ||
+                error.message.includes("REPLACE_WITH_"))
+        const errorMessage =
+            error instanceof Error ? error.message : "Failed to process chat request"
 
         return Response.json(
             {
-                error: error?.message || "Failed to process chat request",
+                error: errorMessage,
                 isBindingError: Boolean(isBindingError),
             },
             { status: isBindingError ? 503 : 500 }

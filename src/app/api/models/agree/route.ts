@@ -16,11 +16,10 @@ export async function POST(req: Request) {
 
         const success = await acceptModelAgreement(model)
         return Response.json({ success, model })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in POST /api/models/agree:", error)
-        return Response.json(
-            { error: error?.message || "Failed to submit model license agreement" },
-            { status: 500 }
-        )
+        const msg =
+            error instanceof Error ? error.message : "Failed to submit model license agreement"
+        return Response.json({ error: msg }, { status: 500 })
     }
 }

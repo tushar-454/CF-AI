@@ -1,8 +1,9 @@
 import { createDocument } from "@/lib/db"
-import { getAi, getR2 } from "@/lib/ai"
+import { getR2 } from "@/lib/ai"
 import { indexDocument } from "@/lib/rag"
 import { env } from "cloudflare:workers"
 import { verifyPin } from "@/lib/auth"
+import { AppEnv } from "@/lib/types"
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10 MB
 
@@ -63,6 +64,12 @@ export async function POST(req: Request) {
 
         const formData = await req.formData()
         const file = formData.get("file")
+        const rawConversationId =
+            (formData.get("conversationId") as string) ||
+            (formData.get("conversation_id") as string) ||
+            null
+        const conversationId =
+            rawConversationId && rawConversationId.trim() ? rawConversationId.trim() : null
 
         if (!file || !(file instanceof File)) {
             return Response.json(
@@ -97,6 +104,7 @@ export async function POST(req: Request) {
             customMetadata: {
                 originalName: file.name,
                 documentId,
+                conversationId: conversationId || "",
             },
         })
 
@@ -109,11 +117,19 @@ export async function POST(req: Request) {
                 extractedText = decoder.decode(arrayBuffer)
 
                 // If Vectorize and AI bindings are available, index the text
-                const ai = (env as any)?.AI
-                const vectorize = (env as any)?.VECTORIZE
+                const appEnv = env as unknown as AppEnv
+                const ai = appEnv.AI
+                const vectorize = appEnv.VECTORIZE
                 if (ai && vectorize && extractedText.trim()) {
                     try {
-                        await indexDocument(ai, vectorize, documentId, file.name, extractedText)
+                        await indexDocument(
+                            ai,
+                            vectorize,
+                            documentId,
+                            file.name,
+                            extractedText,
+                            conversationId
+                        )
                     } catch (ragErr) {
                         console.warn(
                             "Could not index document in Vectorize (likely placeholder config):",
@@ -130,6 +146,7 @@ export async function POST(req: Request) {
         try {
             await createDocument({
                 id: documentId,
+                conversation_id: conversationId,
                 name: file.name,
                 r2_key: r2Key,
                 mime: file.type || "application/octet-stream",
@@ -137,12 +154,14 @@ export async function POST(req: Request) {
                 status,
                 created_at: Date.now(),
             })
-        } catch (dbErr: any) {
-            console.warn("D1 could not record document:", dbErr?.message)
+        } catch (dbErr: unknown) {
+            const msg = dbErr instanceof Error ? dbErr.message : String(dbErr)
+            console.warn("D1 could not record document:", msg)
         }
 
         return Response.json({
             id: documentId,
+            conversation_id: conversationId,
             name: file.name,
             mime: file.type || "application/octet-stream",
             size: file.size,
@@ -153,16 +172,18 @@ export async function POST(req: Request) {
             status,
             textContent: extractedText ? extractedText.slice(0, 4000) : undefined, // Provide preview/context
         })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in POST /api/upload:", error)
         const isBindingError =
-            error?.name === "R2BindingError" ||
-            error?.name === "DatabaseBindingError" ||
-            error?.message?.includes("REPLACE_WITH_")
+            error instanceof Error &&
+            (error.name === "R2BindingError" ||
+                error.name === "DatabaseBindingError" ||
+                error.message.includes("REPLACE_WITH_"))
+        const errorMessage = error instanceof Error ? error.message : "File upload failed"
 
         return Response.json(
             {
-                error: error?.message || "File upload failed",
+                error: errorMessage,
                 isBindingError: Boolean(isBindingError),
             },
             { status: isBindingError ? 503 : 500 }

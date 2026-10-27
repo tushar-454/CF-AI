@@ -3,6 +3,7 @@ import { getR2 } from "@/lib/ai"
 import { deleteDocumentVectors } from "@/lib/rag"
 import { env } from "cloudflare:workers"
 import { verifyPin } from "@/lib/auth"
+import { AppEnv } from "@/lib/types"
 
 function inferMime(filename: string): string {
     const ext = filename.split(".").pop()?.toLowerCase()
@@ -74,13 +75,11 @@ export async function GET(_req: Request, context: { params: Promise<{ id: string
         headers.set("Cache-Control", "public, max-age=31536000, immutable")
 
         return new Response(object.body, { headers })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in GET /api/files/[id]:", error)
-        const isBindingError = error?.name === "R2BindingError"
-        return Response.json(
-            { error: error?.message || "Failed to retrieve file", isBindingError },
-            { status: isBindingError ? 503 : 500 }
-        )
+        const isBindingError = error instanceof Error && error.name === "R2BindingError"
+        const msg = error instanceof Error ? error.message : "Failed to retrieve file"
+        return Response.json({ error: msg, isBindingError }, { status: isBindingError ? 503 : 500 })
     }
 }
 
@@ -108,7 +107,8 @@ export async function DELETE(req: Request, context: { params: Promise<{ id: stri
 
         // 2. Delete vectors from Vectorize
         try {
-            const vectorize = (env as any)?.VECTORIZE
+            const appEnv = env as unknown as AppEnv
+            const vectorize = appEnv.VECTORIZE
             if (vectorize) {
                 await deleteDocumentVectors(vectorize, id)
             }
@@ -120,13 +120,12 @@ export async function DELETE(req: Request, context: { params: Promise<{ id: stri
         await deleteDocument(id)
 
         return Response.json({ success: true, deletedId: id })
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in DELETE /api/files/[id]:", error)
         const isBindingError =
-            error?.name === "DatabaseBindingError" || error?.name === "R2BindingError"
-        return Response.json(
-            { error: error?.message || "Failed to delete file", isBindingError },
-            { status: isBindingError ? 503 : 500 }
-        )
+            error instanceof Error &&
+            (error.name === "DatabaseBindingError" || error.name === "R2BindingError")
+        const msg = error instanceof Error ? error.message : "Failed to delete file"
+        return Response.json({ error: msg, isBindingError }, { status: isBindingError ? 503 : 500 })
     }
 }

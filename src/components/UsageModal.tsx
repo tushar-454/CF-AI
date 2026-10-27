@@ -70,8 +70,9 @@ export function UsageModal({ isOpen, onClose }: UsageModalProps) {
             if (!res.ok) throw new Error("Failed to load usage data")
             const json = await res.json()
             setData(json as UsageData)
-        } catch (err: any) {
-            setError(err.message || "An error occurred")
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : "An error occurred"
+            setError(msg)
         } finally {
             setLoading(false)
         }

@@ -183,8 +183,9 @@ export function ChatContainer() {
     useEffect(() => {
         if (!isAuthenticated) return
         fetch("/api/models", { headers: getAuthHeaders() })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data: any) => {
+            .then(async (res) => {
+                if (!res.ok) return
+                const data = (await res.json()) as { models?: ModelInfo[] }
                 if (data?.models && Array.isArray(data.models)) {
                     setModels(data.models)
                 }
@@ -198,10 +199,10 @@ export function ChatContainer() {
         try {
             const res = await fetch("/api/conversations", { headers: getAuthHeaders() })
             if (res.ok) {
-                const data: any = await res.json()
+                const data = (await res.json()) as Conversation[]
                 setConversations(Array.isArray(data) ? data : [])
             } else {
-                const err: any = await res.json().catch(() => ({}))
+                const err = (await res.json().catch(() => ({}))) as { isBindingError?: boolean }
                 if (err.isBindingError) {
                     addToast(
                         "Cloudflare D1 is unconfigured. Replace REPLACE_WITH_D1_ID in cloudflare.config.ts.",
@@ -209,8 +210,9 @@ export function ChatContainer() {
                     )
                 }
             }
-        } catch (err: any) {
-            console.warn("Could not load conversations:", err?.message)
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err)
+            console.warn("Could not load conversations:", msg)
         }
     }, [isAuthenticated, addToast])
 
@@ -276,7 +278,11 @@ export function ChatContainer() {
                 setIsLoadingConversation(true)
                 const res = await fetch(`/api/conversations/${id}`, { headers: getAuthHeaders() })
                 if (res.ok) {
-                    const data: any = await res.json()
+                    const data = (await res.json()) as {
+                        messages?: Message[]
+                        title?: string
+                        model?: string
+                    }
                     setMessages(Array.isArray(data.messages) ? data.messages : [])
                     setActiveConversationId(id)
                     if (data.title) {
@@ -295,11 +301,13 @@ export function ChatContainer() {
                     setMessages([])
                     updateUrlConversationId(undefined, true)
                 } else {
-                    const err: any = await res.json().catch(() => ({}))
+                    const err = (await res.json().catch(() => ({}))) as { error?: string }
                     addToast(err?.error || "Failed to load conversation", true)
                 }
-            } catch (err: any) {
-                addToast(err?.message || "Failed to load conversation messages", true)
+            } catch (err: unknown) {
+                const msg =
+                    err instanceof Error ? err.message : "Failed to load conversation messages"
+                addToast(msg, true)
             } finally {
                 setIsLoadingConversation(false)
             }
@@ -473,7 +481,10 @@ export function ChatContainer() {
             })
 
             if (!res.ok) {
-                const errData: any = await res.json().catch(() => ({}))
+                const errData = (await res.json().catch(() => ({}))) as {
+                    error?: string
+                    isBindingError?: boolean
+                }
                 const rawErrMsg = errData.error || `Request failed with status ${res.status}`
                 if (
                     rawErrMsg.includes("5016") ||
@@ -615,10 +626,12 @@ export function ChatContainer() {
                 updateUrlConversationId(serverConversationId, true)
             }
             loadConversations()
-        } catch (err: any) {
-            if (err.name !== "AbortError") {
+        } catch (err: unknown) {
+            const isAbort = err instanceof Error && err.name === "AbortError"
+            if (!isAbort) {
                 console.error("Chat error:", err)
-                addToast(err?.message || "Generation was interrupted", true)
+                const msg = err instanceof Error ? err.message : "Generation was interrupted"
+                addToast(msg, true)
             }
             setIsStreaming(false)
             setStreamingContent("")
@@ -903,6 +916,11 @@ export function ChatContainer() {
                 isOpen={isKnowledgeBaseOpen}
                 onClose={() => setIsKnowledgeBaseOpen(false)}
                 onNotification={addToast}
+                activeConversationId={activeConversationId}
+                activeConversationTitle={
+                    conversations.find((c) => c.id === activeConversationId)?.title ||
+                    activeConversationTitle
+                }
             />
 
             {/* Usage & Limits Modal */}

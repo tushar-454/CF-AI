@@ -13,14 +13,16 @@ export async function GET(req: Request) {
 
         const conversations = await listConversations()
         return Response.json(conversations)
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Error in GET /api/conversations:", error)
         const isBindingError =
-            error?.name === "DatabaseBindingError" || error?.message?.includes("REPLACE_WITH_D1_ID")
+            error instanceof Error &&
+            (error.name === "DatabaseBindingError" || error.message.includes("REPLACE_WITH_D1_ID"))
+        const msg = error instanceof Error ? error.message : "Failed to list conversations"
 
         return Response.json(
             {
-                error: error?.message || "Failed to list conversations",
+                error: msg,
                 isBindingError: Boolean(isBindingError),
             },
             { status: isBindingError ? 503 : 500 }

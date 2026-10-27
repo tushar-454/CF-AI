@@ -6,7 +6,7 @@ import { ModelSelector } from "./ModelSelector"
 import { ContextSelector } from "./ContextSelector"
 import { EffortSelector } from "./EffortSelector"
 import { VoiceInput } from "./VoiceInput"
-import { PaperclipIcon, SendIcon, StopIcon, XIcon, FileTextIcon, ImageIcon } from "./Icons"
+import { PaperclipIcon, SendIcon, StopIcon, XIcon, FileTextIcon } from "./Icons"
 import { getAuthHeaders } from "@/lib/auth-client"
 
 interface ChatComposerProps {
@@ -112,15 +112,16 @@ export function ChatComposer({
                 })
 
                 if (!res.ok) {
-                    const errData: any = await res.json().catch(() => ({}))
+                    const errData = (await res.json().catch(() => ({}))) as { error?: string }
                     throw new Error(errData.error || `Upload failed for ${file.name}`)
                 }
 
                 const data: Attachment = await res.json()
                 setAttachments((prev) => [...prev, data])
                 onNotification?.(`Attached "${file.name}".`)
-            } catch (err: any) {
-                onNotification?.(err?.message || "File upload failed", true)
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : "File upload failed"
+                onNotification?.(msg, true)
             }
         }
 
