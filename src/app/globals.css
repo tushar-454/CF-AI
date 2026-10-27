@@ -1,61 +1,62 @@
 @import "tailwindcss";
 
 :root {
-  --background: #faf9f5;
-  --sidebar-bg: #f3f1ec;
-  --surface-bg: #ffffff;
-  --input-bg: #fbfbfa;
-  --border: #e6e3dc;
-  --text-primary: #1f1e1d;
-  --text-muted: #736e67;
-  --accent: #c2410c;
-  --selected-bg: #ebe7df;
-  --button-hover: #ebe8e1;
-  --badge-bg: #efece6;
-  --user-msg-bg: #f0eee6;
-  --code-bg: #21201e;
-  --code-header-bg: #1a1918;
-  --code-text: #f5f4f0;
+    --background: #faf9f5;
+    --sidebar-bg: #f3f1ec;
+    --surface-bg: #ffffff;
+    --input-bg: #fbfbfa;
+    --border: #e6e3dc;
+    --text-primary: #1f1e1d;
+    --text-muted: #736e67;
+    --accent: #c2410c;
+    --selected-bg: #ebe7df;
+    --button-hover: #ebe8e1;
+    --badge-bg: #efece6;
+    --user-msg-bg: #f0eee6;
+    --code-bg: #21201e;
+    --code-header-bg: #1a1918;
+    --code-text: #f5f4f0;
 
-  --scrollbar-thumb: rgba(115, 110, 103, 0.35);
-  --scrollbar-thumb-hover: rgba(194, 65, 12, 0.75);
+    --scrollbar-thumb: rgba(115, 110, 103, 0.35);
+    --scrollbar-thumb-hover: rgba(194, 65, 12, 0.75);
 
-  color-scheme: light;
+    color-scheme: light;
 }
 
 html.dark {
-  --background: #181716;
-  --sidebar-bg: #1f1e1c;
-  --surface-bg: #242320;
-  --input-bg: #1d1c1a;
-  --border: #2e2d2a;
-  --text-primary: #edebe8;
-  --text-muted: #9e9b95;
-  --accent: #e07a5f;
-  --selected-bg: #2f2d2a;
-  --button-hover: #2c2a27;
-  --badge-bg: #2a2926;
-  --user-msg-bg: #2b2927;
-  --code-bg: #131211;
-  --code-header-bg: #1a1918;
-  --code-text: #edebe8;
-  --scrollbar-thumb: rgba(158, 155, 149, 0.35);
-  --scrollbar-thumb-hover: rgba(224, 122, 95, 0.75);
+    --background: #181716;
+    --sidebar-bg: #1f1e1c;
+    --surface-bg: #242320;
+    --input-bg: #1d1c1a;
+    --border: #2e2d2a;
+    --text-primary: #edebe8;
+    --text-muted: #9e9b95;
+    --accent: #e07a5f;
+    --selected-bg: #2f2d2a;
+    --button-hover: #2c2a27;
+    --badge-bg: #2a2926;
+    --user-msg-bg: #2b2927;
+    --code-bg: #131211;
+    --code-header-bg: #1a1918;
+    --code-text: #edebe8;
+    --scrollbar-thumb: rgba(158, 155, 149, 0.35);
+    --scrollbar-thumb-hover: rgba(224, 122, 95, 0.75);
 
-  color-scheme: dark;
+    color-scheme: dark;
 }
 
 html,
 body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  height: 100dvh;
-  background-color: var(--background);
-  color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  overflow: hidden;
-  overscroll-behavior: none;
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    height: 100dvh;
+    background-color: var(--background);
+    color: var(--text-primary);
+    font-family:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    overscroll-behavior: none;
 }
 
 /* ========================================================
@@ -63,14 +64,14 @@ body {
    Remove / hide scrollbars globally by default across all elements
    ======================================================== */
 * {
-  scrollbar-width: none !important;
-  -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
 }
 
 *::-webkit-scrollbar {
-  display: none !important;
-  width: 0px !important;
-  height: 0px !important;
+    display: none !important;
+    width: 0px !important;
+    height: 0px !important;
 }
 
 /* ========================================================
@@ -81,114 +82,122 @@ body {
 .custom-scrollbar-y,
 .scrollbar-custom,
 .scrollbar-thin {
-  scrollbar-width: thin !important;
-  scrollbar-color: var(--scrollbar-thumb) transparent !important;
-  -ms-overflow-style: auto !important;
+    scrollbar-width: thin !important;
+    scrollbar-color: var(--scrollbar-thumb) transparent !important;
+    -ms-overflow-style: auto !important;
 }
 
 .custom-scrollbar::-webkit-scrollbar,
 .custom-scrollbar-y::-webkit-scrollbar,
 .scrollbar-custom::-webkit-scrollbar,
 .scrollbar-thin::-webkit-scrollbar {
-  display: block !important;
-  width: 6px !important;
-  height: 6px !important;
+    display: block !important;
+    width: 6px !important;
+    height: 6px !important;
 }
 
 .custom-scrollbar::-webkit-scrollbar-track,
 .custom-scrollbar-y::-webkit-scrollbar-track,
 .scrollbar-custom::-webkit-scrollbar-track,
 .scrollbar-thin::-webkit-scrollbar-track {
-  background: transparent !important;
+    background: transparent !important;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb,
 .custom-scrollbar-y::-webkit-scrollbar-thumb,
 .scrollbar-custom::-webkit-scrollbar-thumb,
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background-color: var(--scrollbar-thumb) !important;
-  border-radius: 9999px !important;
-  border: 1px solid transparent !important;
-  background-clip: padding-box !important;
-  transition: background-color 0.2s ease-in-out;
+    background-color: var(--scrollbar-thumb) !important;
+    border-radius: 9999px !important;
+    border: 1px solid transparent !important;
+    background-clip: padding-box !important;
+    transition: background-color 0.2s ease-in-out;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover,
 .custom-scrollbar-y::-webkit-scrollbar-thumb:hover,
 .scrollbar-custom::-webkit-scrollbar-thumb:hover,
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background-color: var(--scrollbar-thumb-hover) !important;
+    background-color: var(--scrollbar-thumb-hover) !important;
 }
 
 .scrollbar-none::-webkit-scrollbar {
-  display: none !important;
+    display: none !important;
 }
 .scrollbar-none {
-  -ms-overflow-style: none !important;
-  scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
 }
 
 /* Markdown prose styling */
 .markdown-content p {
-  margin-top: 0.5rem;
-  margin-bottom: 0.5rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
 }
 
 .markdown-content h1,
 .markdown-content h2,
 .markdown-content h3,
 .markdown-content h4 {
-  font-weight: 600;
-  margin-top: 1.25rem;
-  margin-bottom: 0.5rem;
-  color: var(--text-primary);
+    font-weight: 600;
+    margin-top: 1.25rem;
+    margin-bottom: 0.5rem;
+    color: var(--text-primary);
 }
 
 .markdown-content ul,
 .markdown-content ol {
-  padding-left: 1.5rem;
-  margin-top: 0.5rem;
-  margin-bottom: 0.5rem;
+    padding-left: 1.5rem;
+    margin-top: 0.5rem;
+    margin-bottom: 0.5rem;
 }
 
 .markdown-content ul {
-  list-style-type: disc;
+    list-style-type: disc;
 }
 
 .markdown-content ol {
-  list-style-type: decimal;
+    list-style-type: decimal;
 }
 
 .markdown-content li {
-  margin-top: 0.25rem;
-  margin-bottom: 0.25rem;
+    margin-top: 0.25rem;
+    margin-bottom: 0.25rem;
 }
 
 .markdown-content blockquote {
-  border-left: 3px solid var(--accent);
-  padding-left: 1rem;
-  margin-left: 0;
-  margin-right: 0;
-  font-style: italic;
-  color: var(--text-muted);
+    border-left: 3px solid var(--accent);
+    padding-left: 1rem;
+    margin-left: 0;
+    margin-right: 0;
+    font-style: italic;
+    color: var(--text-muted);
 }
 
 .markdown-content code:not(pre code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.85em;
-  padding: 0.15em 0.35em;
-  border-radius: 0.35em;
-  background-color: var(--badge-bg);
-  border: 1px solid var(--border);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.85em;
+    padding: 0.15em 0.35em;
+    border-radius: 0.35em;
+    background-color: var(--badge-bg);
+    border: 1px solid var(--border);
 }
 
 @keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  20%, 60% { transform: translateX(-8px); }
-  40%, 80% { transform: translateX(8px); }
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+    20%,
+    60% {
+        transform: translateX(-8px);
+    }
+    40%,
+    80% {
+        transform: translateX(8px);
+    }
 }
 
 .animate-shake {
-  animation: shake 0.4s cubic-bezier(.36,.07,.19,.97) both;
+    animation: shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
 }
-

@@ -1,0 +1,16 @@
+node_modules
+dist
+build
+out
+.next
+.vinext
+.cloudflare
+.wrangler
+.cache
+.turbo
+*.tsbuildinfo
+next-env.d.ts
+package-lock.json
+*.log
+.dev.vars*
+.env*

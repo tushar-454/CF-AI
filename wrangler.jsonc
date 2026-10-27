@@ -1,37 +1,37 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "cf-ai",
-  "account_id": "7ab77eaa396c9a6435e5659a299e07cf",
-  "main": ".cloudflare/output/v0/workers/default/bundle/index.js",
-  "assets": {
-    "directory": ".cloudflare/output/v0/workers/default/assets",
-    "binding": "ASSETS",
-    "html_handling": "none",
-    "not_found_handling": "none",
-    "run_worker_first": true
-  },
-  "compatibility_date": "2026-10-27",
-  "compatibility_flags": ["nodejs_compat"],
-  "ai": {
-    "binding": "AI"
-  },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "chatbot-db",
-      "database_id": "52285e7e-0124-4a60-a144-03dc406a11fe"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "FILES",
-      "bucket_name": "chatbot-files"
-    }
-  ],
-  "vectorize": [
-    {
-      "binding": "VECTORIZE",
-      "index_name": "chatbot-rag-index"
-    }
-  ]
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "cf-ai",
+    "account_id": "7ab77eaa396c9a6435e5659a299e07cf",
+    "main": ".cloudflare/output/v0/workers/default/bundle/index.js",
+    "assets": {
+        "directory": ".cloudflare/output/v0/workers/default/assets",
+        "binding": "ASSETS",
+        "html_handling": "none",
+        "not_found_handling": "none",
+        "run_worker_first": true,
+    },
+    "compatibility_date": "2026-10-27",
+    "compatibility_flags": ["nodejs_compat"],
+    "ai": {
+        "binding": "AI",
+    },
+    "d1_databases": [
+        {
+            "binding": "DB",
+            "database_name": "chatbot-db",
+            "database_id": "52285e7e-0124-4a60-a144-03dc406a11fe",
+        },
+    ],
+    "r2_buckets": [
+        {
+            "binding": "FILES",
+            "bucket_name": "chatbot-files",
+        },
+    ],
+    "vectorize": [
+        {
+            "binding": "VECTORIZE",
+            "index_name": "chatbot-rag-index",
+        },
+    ],
 }

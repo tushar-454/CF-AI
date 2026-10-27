@@ -1,54 +1,54 @@
-"use client";
+"use client"
 
-import React, { useMemo } from "react";
-import { marked } from "marked";
+import React, { useMemo } from "react"
+import { marked } from "marked"
 
 interface MarkdownRendererProps {
-  content: string;
+    content: string
 }
 
 export function MarkdownRenderer({ content }: MarkdownRendererProps) {
-  const parsedHtml = useMemo(() => {
-    try {
-      return marked.parse(content, { async: false }) as string;
-    } catch {
-      return content;
-    }
-  }, [content]);
-
-  return (
-    <div
-      className="markdown-content prose max-w-none text-inherit leading-relaxed"
-      dangerouslySetInnerHTML={{ __html: parsedHtml }}
-      onClick={(e) => {
-        const target = e.target as HTMLElement;
-        const copyBtn = target.closest("button.copy-code-btn") as HTMLButtonElement | null;
-        if (copyBtn) {
-          const rawCode = copyBtn.getAttribute("data-code");
-          if (rawCode) {
-            navigator.clipboard.writeText(decodeURIComponent(rawCode));
-            const iconSpan = copyBtn.querySelector(".copy-status-text");
-            if (iconSpan) {
-              const prev = iconSpan.textContent;
-              iconSpan.textContent = "Copied!";
-              setTimeout(() => {
-                iconSpan.textContent = prev;
-              }, 2000);
-            }
-          }
+    const parsedHtml = useMemo(() => {
+        try {
+            return marked.parse(content, { async: false }) as string
+        } catch {
+            return content
         }
-      }}
-    />
-  );
+    }, [content])
+
+    return (
+        <div
+            className="markdown-content prose max-w-none text-inherit leading-relaxed"
+            dangerouslySetInnerHTML={{ __html: parsedHtml }}
+            onClick={(e) => {
+                const target = e.target as HTMLElement
+                const copyBtn = target.closest("button.copy-code-btn") as HTMLButtonElement | null
+                if (copyBtn) {
+                    const rawCode = copyBtn.getAttribute("data-code")
+                    if (rawCode) {
+                        navigator.clipboard.writeText(decodeURIComponent(rawCode))
+                        const iconSpan = copyBtn.querySelector(".copy-status-text")
+                        if (iconSpan) {
+                            const prev = iconSpan.textContent
+                            iconSpan.textContent = "Copied!"
+                            setTimeout(() => {
+                                iconSpan.textContent = prev
+                            }, 2000)
+                        }
+                    }
+                }
+            }}
+        />
+    )
 }
 
 if (typeof window !== "undefined") {
-  const renderer = new marked.Renderer();
+    const renderer = new marked.Renderer()
 
-  renderer.code = function ({ text, lang }: any) {
-    const language = lang || "plaintext";
-    const encoded = encodeURIComponent(text);
-    return `
+    renderer.code = function ({ text, lang }: any) {
+        const language = lang || "plaintext"
+        const encoded = encodeURIComponent(text)
+        return `
       <div class="code-block my-4 rounded-xl overflow-hidden border border-[var(--border)] bg-[var(--code-bg)] text-[var(--code-text)] text-sm shadow-xs">
         <div class="flex items-center justify-between px-4 py-2 border-b border-[var(--border)] bg-[var(--code-header-bg)] text-xs text-[var(--text-muted)] font-mono">
           <span class="font-medium tracking-wide uppercase">${language}</span>
@@ -62,21 +62,21 @@ if (typeof window !== "undefined") {
         </div>
         <pre class="p-4 overflow-x-auto font-mono text-[13px] leading-relaxed m-0 custom-scrollbar"><code>${escapeHtml(text)}</code></pre>
       </div>
-    `;
-  };
+    `
+    }
 
-  renderer.link = function ({ href, title, text }: any) {
-    return `<a href="${href}" ${title ? `title="${title}"` : ""} target="_blank" rel="noopener noreferrer" class="text-[var(--accent)] underline underline-offset-2 hover:opacity-80">${text}</a>`;
-  };
+    renderer.link = function ({ href, title, text }: any) {
+        return `<a href="${href}" ${title ? `title="${title}"` : ""} target="_blank" rel="noopener noreferrer" class="text-[var(--accent)] underline underline-offset-2 hover:opacity-80">${text}</a>`
+    }
 
-  marked.setOptions({ renderer });
+    marked.setOptions({ renderer })
 }
 
 function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+    return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;")
 }

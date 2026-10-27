@@ -1,37 +1,49 @@
 {
-	"name": "cf-ai",
-	"version": "0.1.0",
-	"private": true,
-	"packageManager": "npm@11.19.0",
-	"dependencies": {
-		"@vinext/cloudflare": "latest",
-		"marked": "^18.1.2",
-		"react": "latest",
-		"react-dom": "latest",
-		"react-server-dom-webpack": "latest",
-		"vinext": "latest",
-		"zod": "^4.6.7"
-	},
-	"devDependencies": {
-		"@cloudflare/vite-plugin": "beta",
-		"@tailwindcss/postcss": "latest",
-		"@types/node": "latest",
-		"@types/react": "latest",
-		"@types/react-dom": "latest",
-		"@vitejs/plugin-react": "latest",
-		"@vitejs/plugin-rsc": "latest",
-		"cf": "^1.0.0-beta.23",
-		"tailwindcss": "latest",
-		"typescript": "latest",
-		"vite": "8.3.0"
-	},
-	"type": "module",
-	"scripts": {
-		"dev": "vite dev",
-		"build": "vite build",
-		"start": "vite preview",
-		"deploy": "node scripts/deploy.mjs",
-		"preview": "npm run build && npm run start --",
-		"cf-typegen": "cf workers types"
-	}
+    "name": "cf-ai",
+    "version": "0.1.0",
+    "private": true,
+    "packageManager": "npm@11.19.0",
+    "dependencies": {
+        "@vinext/cloudflare": "latest",
+        "marked": "^18.1.2",
+        "react": "latest",
+        "react-dom": "latest",
+        "react-server-dom-webpack": "latest",
+        "vinext": "latest",
+        "zod": "^4.6.7"
+    },
+    "devDependencies": {
+        "@cloudflare/vite-plugin": "beta",
+        "@eslint/js": "^9.39.5",
+        "@tailwindcss/postcss": "latest",
+        "@types/node": "latest",
+        "@types/react": "latest",
+        "@types/react-dom": "latest",
+        "@vitejs/plugin-react": "latest",
+        "@vitejs/plugin-rsc": "latest",
+        "cf": "^1.0.0-beta.23",
+        "eslint": "^9.39.5",
+        "eslint-config-prettier": "^10.1.8",
+        "eslint-plugin-react": "^7.37.5",
+        "eslint-plugin-react-hooks": "^5.2.0",
+        "globals": "^16.5.0",
+        "prettier": "^3.9.10",
+        "tailwindcss": "latest",
+        "typescript": "latest",
+        "typescript-eslint": "^8.72.1",
+        "vite": "8.3.0"
+    },
+    "type": "module",
+    "scripts": {
+        "dev": "vite dev",
+        "build": "vite build",
+        "start": "vite preview",
+        "deploy": "node scripts/deploy.mjs",
+        "preview": "npm run build && npm run start --",
+        "cf-typegen": "cf workers types",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "format": "prettier --write .",
+        "format:check": "prettier --check ."
+    }
 }
