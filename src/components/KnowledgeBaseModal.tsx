@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { DocumentItem } from "@/lib/types";
 import { AlertCircleIcon, BookOpenIcon, CheckIcon, FileTextIcon, ImageIcon, PaperclipIcon, TrashIcon, XIcon } from "./Icons";
-import { getAuthHeaders } from "@/lib/auth";
+import { getAuthHeaders } from "@/lib/auth-client";
 
 interface KnowledgeBaseModalProps {
   isOpen: boolean;

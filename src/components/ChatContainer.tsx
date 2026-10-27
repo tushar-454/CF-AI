@@ -11,7 +11,7 @@ import { UsageModal } from "./UsageModal";
 import { PinLogin } from "./PinLogin";
 import { Toast, ToastMessage } from "./Toast";
 import { ActivityIcon, ArrowDownIcon, BookOpenIcon, CheckIcon, LinkIcon, LockIcon, MenuIcon, SparklesIcon } from "./Icons";
-import { AUTH_STORAGE_KEY, getAuthHeaders, verifyPin } from "@/lib/auth";
+import { AUTH_HEADER_NAME, AUTH_STORAGE_KEY, getAuthHeaders } from "@/lib/auth-client";
 
 const SUGGESTED_PROMPTS = [
   {
@@ -71,8 +71,25 @@ export function ChatContainer() {
   // Check PIN authentication from localStorage on initial mount
   useEffect(() => {
     const savedPin = typeof window !== "undefined" ? localStorage.getItem(AUTH_STORAGE_KEY) : null;
-    if (verifyPin(savedPin)) {
+    if (savedPin && savedPin.trim().length === 4) {
       setIsAuthenticated(true);
+      fetch("/api/auth/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [AUTH_HEADER_NAME]: savedPin.trim(),
+        },
+        body: JSON.stringify({ pin: savedPin.trim() }),
+      })
+        .then((res) => {
+          if (!res.ok) {
+            localStorage.removeItem(AUTH_STORAGE_KEY);
+            setIsAuthenticated(false);
+          }
+        })
+        .catch(() => {
+          // Keep optimistic authentication on network failure
+        });
     } else {
       setIsAuthenticated(false);
     }

@@ -30,6 +30,8 @@ export default defineConfig({
       VECTORIZE: bindings.vectorize({
         name: "chatbot-rag-index",
       }),
+      // Application security PIN secret binding
+      APP_PIN: bindings.secret(),
     },
   }),
 });

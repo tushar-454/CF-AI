@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { XIcon, ActivityIcon } from "./Icons";
-import { getAuthHeaders } from "@/lib/auth";
+import { getAuthHeaders } from "@/lib/auth-client";
 
 interface ModelUsage {
   model: string;

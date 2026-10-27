@@ -1,6 +1,6 @@
 "use client";
 
-import { AUTH_STORAGE_KEY, verifyPin } from "@/lib/auth";
+import { AUTH_HEADER_NAME, AUTH_STORAGE_KEY } from "@/lib/auth-client";
 import { ClipboardEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { LockIcon, ShieldCheckIcon } from "./Icons";
 
@@ -12,6 +12,7 @@ export function PinLogin({ onSuccess }: PinLoginProps) {
   const [digits, setDigits] = useState<string[]>(["", "", "", ""]);
   const [error, setError] = useState<string | null>(null);
   const [isShaking, setIsShaking] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
   const [showPin, setShowPin] = useState(false);
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
@@ -25,16 +26,36 @@ export function PinLogin({ onSuccess }: PinLoginProps) {
     setTimeout(() => setIsShaking(false), 500);
   };
 
-  const handleVerify = (pinToTest: string) => {
-    if (verifyPin(pinToTest)) {
-      setError(null);
-      localStorage.setItem(AUTH_STORAGE_KEY, pinToTest);
-      onSuccess();
-    } else {
-      setError("Incorrect PIN. Please check and try again.");
+  const handleVerify = async (pinToTest: string) => {
+    if (isVerifying) return;
+    setIsVerifying(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/auth/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [AUTH_HEADER_NAME]: pinToTest,
+        },
+        body: JSON.stringify({ pin: pinToTest }),
+      });
+
+      if (res.ok) {
+        setError(null);
+        localStorage.setItem(AUTH_STORAGE_KEY, pinToTest);
+        onSuccess();
+      } else {
+        setError("Incorrect PIN. Please check and try again.");
+        triggerShake();
+        setDigits(["", "", "", ""]);
+        inputRefs.current[0]?.focus();
+      }
+    } catch {
+      setError("Network error verifying PIN. Please try again.");
       triggerShake();
-      setDigits(["", "", "", ""]);
-      inputRefs.current[0]?.focus();
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -180,11 +201,11 @@ export function PinLogin({ onSuccess }: PinLoginProps) {
         <button
           type="button"
           onClick={() => handleVerify(digits.join(""))}
-          disabled={digits.join("").length !== 4}
+          disabled={digits.join("").length !== 4 || isVerifying}
           className="w-full py-3 px-4 rounded-xl font-medium text-xs bg-[var(--accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed text-white transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer"
         >
           <ShieldCheckIcon size={16} />
-          <span>Unlock & Access Chat</span>
+          <span>{isVerifying ? "Verifying..." : "Unlock & Access Chat"}</span>
         </button>
       </div>
     </div>

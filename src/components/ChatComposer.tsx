@@ -7,7 +7,7 @@ import { ContextSelector } from "./ContextSelector";
 import { EffortSelector } from "./EffortSelector";
 import { VoiceInput } from "./VoiceInput";
 import { PaperclipIcon, SendIcon, StopIcon, XIcon, FileTextIcon, ImageIcon } from "./Icons";
-import { getAuthHeaders } from "@/lib/auth";
+import { getAuthHeaders } from "@/lib/auth-client";
 
 interface ChatComposerProps {
   models: ModelInfo[];

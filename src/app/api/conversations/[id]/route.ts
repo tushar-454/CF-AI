@@ -9,7 +9,7 @@ const PatchSchema = z.object({
 export async function GET(req: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const pin = req.headers.get("x-app-pin");
-    if (!verifyPin(pin)) {
+    if (!verifyPin(pin, req)) {
       return Response.json({ error: "Unauthorized. Please enter the correct 4-digit security PIN." }, { status: 401 });
     }
 
@@ -37,7 +37,7 @@ export async function GET(req: Request, context: { params: Promise<{ id: string 
 export async function PATCH(req: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const pin = req.headers.get("x-app-pin");
-    if (!verifyPin(pin)) {
+    if (!verifyPin(pin, req)) {
       return Response.json({ error: "Unauthorized. Please enter the correct 4-digit security PIN." }, { status: 401 });
     }
 
@@ -67,7 +67,7 @@ export async function PATCH(req: Request, context: { params: Promise<{ id: strin
 export async function DELETE(req: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const pin = req.headers.get("x-app-pin");
-    if (!verifyPin(pin)) {
+    if (!verifyPin(pin, req)) {
       return Response.json({ error: "Unauthorized. Please enter the correct 4-digit security PIN." }, { status: 401 });
     }
 

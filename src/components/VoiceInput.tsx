@@ -2,7 +2,7 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { MicIcon, MicOffIcon, RefreshCwIcon } from "./Icons";
-import { getAuthHeaders } from "@/lib/auth";
+import { getAuthHeaders } from "@/lib/auth-client";
 
 interface VoiceInputProps {
   onTranscript: (text: string) => void;

@@ -6,7 +6,7 @@ import { verifyPin } from "@/lib/auth";
 export async function GET(req: Request) {
   try {
     const pin = req.headers.get("x-app-pin");
-    if (!verifyPin(pin)) {
+    if (!verifyPin(pin, req)) {
       return NextResponse.json({ error: "Unauthorized. Please enter the correct 4-digit security PIN." }, { status: 401 });
     }
 

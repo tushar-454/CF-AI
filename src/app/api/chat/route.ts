@@ -31,7 +31,7 @@ const ChatRequestSchema = z.object({
 export async function POST(req: Request) {
   try {
     const pin = req.headers.get("x-app-pin");
-    if (!verifyPin(pin)) {
+    if (!verifyPin(pin, req)) {
       return Response.json(
         { error: "Unauthorized. Please enter the correct 4-digit security PIN." },
         { status: 401 }
