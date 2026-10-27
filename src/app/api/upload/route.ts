@@ -140,7 +140,7 @@ export async function POST(req: Request) {
             }
         }
 
-        // If Vectorize and AI bindings are available, index the text
+        // If Vectorize and AI bindings are available, index the text into the global Vectorize index
         if (ai && vectorize && extractedText.trim()) {
             try {
                 const result = await indexDocument(
@@ -149,7 +149,7 @@ export async function POST(req: Request) {
                     documentId,
                     file.name,
                     extractedText,
-                    conversationId
+                    null
                 )
                 console.log(
                     `Indexed "${file.name}" with ${result.chunksIndexed} chunk(s) into Vectorize.`
@@ -162,14 +162,14 @@ export async function POST(req: Request) {
             }
         }
 
-        // Record document in D1
+        // Record document in D1 under global knowledge base
         try {
             await createDocument({
                 id: documentId,
-                conversation_id: conversationId,
+                conversation_id: null,
                 name: file.name,
                 r2_key: r2Key,
-                mime: file.type || "application/octet-stream",
+                mime: contentType,
                 size: file.size,
                 status,
                 created_at: Date.now(),

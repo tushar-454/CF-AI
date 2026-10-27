@@ -1,7 +1,15 @@
 "use client"
 
 import React, { useState, useEffect, useRef, useCallback } from "react"
-import { Attachment, ContextMode, Conversation, EffortLevel, Message, ModelInfo } from "@/lib/types"
+import {
+    Attachment,
+    ContextMode,
+    Conversation,
+    DocumentItem,
+    EffortLevel,
+    Message,
+    ModelInfo,
+} from "@/lib/types"
 import { DEFAULT_MODEL_ID, MODELS } from "@/lib/models"
 import { Sidebar } from "./Sidebar"
 import { ChatMessage } from "./ChatMessage"
@@ -53,6 +61,10 @@ export function ChatContainer() {
     const [contextMode, setContextMode] = useState<ContextMode>("conversation")
     const [effort, setEffort] = useState<EffortLevel>("medium")
 
+    // Per-chat selected knowledge base documents (by default, 0 documents selected for any chat)
+    const [selectedDocIdsByChat, setSelectedDocIdsByChat] = useState<Record<string, string[]>>({})
+    const [allKnowledgeDocs, setAllKnowledgeDocs] = useState<DocumentItem[]>([])
+
     const [isStreaming, setIsStreaming] = useState(false)
     const [streamingContent, setStreamingContent] = useState("")
     const [streamingReasoning, setStreamingReasoning] = useState("")
@@ -65,6 +77,39 @@ export function ChatContainer() {
     const [toasts, setToasts] = useState<ToastMessage[]>([])
     const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
     const [usageSummary, setUsageSummary] = useState<DailyUsageSummary | null>(null)
+
+    const currentChatKey = activeConversationId || "new_chat"
+    const activeSelectedDocIds = selectedDocIdsByChat[currentChatKey] || []
+
+    const handleToggleSelectDoc = useCallback(
+        (id: string) => {
+            setSelectedDocIdsByChat((prev) => {
+                const current = prev[currentChatKey] || []
+                const next = current.includes(id)
+                    ? current.filter((x) => x !== id)
+                    : [...current, id]
+                return { ...prev, [currentChatKey]: next }
+            })
+        },
+        [currentChatKey]
+    )
+
+    const handleSelectAllDocs = useCallback(
+        (ids: string[]) => {
+            setSelectedDocIdsByChat((prev) => ({
+                ...prev,
+                [currentChatKey]: ids,
+            }))
+        },
+        [currentChatKey]
+    )
+
+    const handleClearSelectedDocs = useCallback(() => {
+        setSelectedDocIdsByChat((prev) => ({
+            ...prev,
+            [currentChatKey]: [],
+        }))
+    }, [currentChatKey])
 
     const fetchUsageMetrics = useCallback(async () => {
         try {
@@ -188,6 +233,20 @@ export function ChatContainer() {
                 const data = (await res.json()) as { models?: ModelInfo[] }
                 if (data?.models && Array.isArray(data.models)) {
                     setModels(data.models)
+                }
+            })
+            .catch(() => {})
+    }, [isAuthenticated])
+
+    // Fetch global knowledge base documents when authenticated
+    useEffect(() => {
+        if (!isAuthenticated) return
+        fetch("/api/files", { headers: getAuthHeaders() })
+            .then(async (res) => {
+                if (!res.ok) return
+                const data = (await res.json()) as DocumentItem[]
+                if (Array.isArray(data)) {
+                    setAllKnowledgeDocs(data)
                 }
             })
             .catch(() => {})
@@ -369,6 +428,7 @@ export function ChatContainer() {
         setMessages([])
         setStreamingContent("")
         setStreamingReasoning("")
+        setSelectedDocIdsByChat((prev) => ({ ...prev, new_chat: [] }))
         updateUrlConversationId(undefined, false)
     }
 
@@ -476,6 +536,7 @@ export function ChatContainer() {
                     effort,
                     contextMode,
                     attachments,
+                    selectedDocumentIds: activeSelectedDocIds,
                 }),
                 signal: controller.signal,
             })
@@ -578,6 +639,19 @@ export function ChatContainer() {
                                 if (!prev) {
                                     updateUrlConversationId(event.conversationId, true)
                                     return event.conversationId
+                                }
+                                return prev
+                            })
+                            setSelectedDocIdsByChat((prev) => {
+                                if (
+                                    prev["new_chat"] &&
+                                    prev["new_chat"].length > 0 &&
+                                    !prev[event.conversationId]
+                                ) {
+                                    return {
+                                        ...prev,
+                                        [event.conversationId]: prev["new_chat"],
+                                    }
                                 }
                                 return prev
                             })
@@ -780,11 +854,16 @@ export function ChatContainer() {
                             type="button"
                             onClick={() => setIsKnowledgeBaseOpen(true)}
                             className="inline-flex items-center gap-1.5 p-2 sm:px-2.5 sm:py-1.5 rounded-xl text-xs font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] bg-[var(--surface-bg)] transition-colors cursor-pointer active:scale-95"
-                            title="Knowledge Base & RAG documents"
+                            title="Global Knowledge Base & per-chat document selection"
                             aria-label="Knowledge Base"
                         >
                             <BookOpenIcon size={15} className="text-[var(--accent)]" />
                             <span className="hidden sm:inline">Knowledge Base</span>
+                            {activeSelectedDocIds.length > 0 && (
+                                <span className="px-1.5 py-0.2 rounded-full bg-[var(--accent)] text-white text-[10px] font-bold leading-tight">
+                                    {activeSelectedDocIds.length}
+                                </span>
+                            )}
                         </button>
 
                         <button
@@ -908,6 +987,10 @@ export function ChatContainer() {
                     isStreaming={isStreaming}
                     onStopGeneration={handleStopGeneration}
                     onNotification={addToast}
+                    selectedDocIds={activeSelectedDocIds}
+                    knowledgeDocs={allKnowledgeDocs}
+                    onToggleSelectDoc={handleToggleSelectDoc}
+                    onOpenKnowledgeBase={() => setIsKnowledgeBaseOpen(true)}
                 />
             </div>
 
@@ -916,11 +999,11 @@ export function ChatContainer() {
                 isOpen={isKnowledgeBaseOpen}
                 onClose={() => setIsKnowledgeBaseOpen(false)}
                 onNotification={addToast}
-                activeConversationId={activeConversationId}
-                activeConversationTitle={
-                    conversations.find((c) => c.id === activeConversationId)?.title ||
-                    activeConversationTitle
-                }
+                selectedDocIds={activeSelectedDocIds}
+                onToggleSelectDoc={handleToggleSelectDoc}
+                onSelectAllDocs={handleSelectAllDocs}
+                onClearSelectedDocs={handleClearSelectedDocs}
+                onDocumentsLoaded={setAllKnowledgeDocs}
             />
 
             {/* Usage & Limits Modal */}

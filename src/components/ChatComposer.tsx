@@ -1,12 +1,12 @@
 "use client"
 
 import React, { useRef, useEffect, useState } from "react"
-import { Attachment, ContextMode, EffortLevel, ModelInfo } from "@/lib/types"
+import { Attachment, ContextMode, DocumentItem, EffortLevel, ModelInfo } from "@/lib/types"
 import { ModelSelector } from "./ModelSelector"
 import { ContextSelector } from "./ContextSelector"
 import { EffortSelector } from "./EffortSelector"
 import { VoiceInput } from "./VoiceInput"
-import { PaperclipIcon, SendIcon, StopIcon, XIcon, FileTextIcon } from "./Icons"
+import { BookOpenIcon, PaperclipIcon, SendIcon, StopIcon, XIcon, FileTextIcon } from "./Icons"
 import { getAuthHeaders } from "@/lib/auth-client"
 
 interface ChatComposerProps {
@@ -21,6 +21,10 @@ interface ChatComposerProps {
     isStreaming: boolean
     onStopGeneration: () => void
     onNotification?: (msg: string, isError?: boolean) => void
+    selectedDocIds?: string[]
+    knowledgeDocs?: DocumentItem[]
+    onToggleSelectDoc?: (id: string) => void
+    onOpenKnowledgeBase?: () => void
 }
 
 export function ChatComposer({
@@ -35,6 +39,10 @@ export function ChatComposer({
     isStreaming,
     onStopGeneration,
     onNotification,
+    selectedDocIds = [],
+    knowledgeDocs = [],
+    onToggleSelectDoc,
+    onOpenKnowledgeBase,
 }: ChatComposerProps) {
     const [input, setInput] = useState("")
     const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -173,6 +181,56 @@ export function ChatComposer({
                     </div>
                 )}
 
+                {/* Active Knowledge Base Document Chips for current chat */}
+                {selectedDocIds.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2.5">
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-600 dark:text-amber-400 shrink-0">
+                            <BookOpenIcon size={12} />
+                            <span>Active RAG:</span>
+                        </span>
+                        {selectedDocIds.map((id) => {
+                            const doc = knowledgeDocs.find((d) => d.id === id)
+                            const isPdf =
+                                doc?.mime === "application/pdf" ||
+                                doc?.name.toLowerCase().endsWith(".pdf")
+                            return (
+                                <div
+                                    key={id}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs bg-amber-500/10 border border-amber-500/25 text-amber-700 dark:text-amber-300 shadow-2xs font-medium"
+                                >
+                                    <span className="truncate max-w-[130px] sm:max-w-[170px]">
+                                        {doc?.name || "Document"}
+                                    </span>
+                                    {isPdf && (
+                                        <span className="text-[9px] font-mono font-bold text-red-500">
+                                            PDF
+                                        </span>
+                                    )}
+                                    {onToggleSelectDoc && (
+                                        <button
+                                            type="button"
+                                            onClick={() => onToggleSelectDoc(id)}
+                                            className="p-0.5 rounded-full hover:bg-amber-500/20 text-amber-600 dark:text-amber-400 cursor-pointer"
+                                            title="Unselect document for this chat"
+                                        >
+                                            <XIcon size={11} />
+                                        </button>
+                                    )}
+                                </div>
+                            )
+                        })}
+                        {onOpenKnowledgeBase && (
+                            <button
+                                type="button"
+                                onClick={onOpenKnowledgeBase}
+                                className="text-[11px] font-medium text-[var(--accent)] hover:underline cursor-pointer ml-1"
+                            >
+                                + Change
+                            </button>
+                        )}
+                    </div>
+                )}
+
                 {/* Text Area */}
                 <textarea
                     ref={textareaRef}
@@ -196,6 +254,36 @@ export function ChatComposer({
                     <EffortSelector value={effort} onChange={onChangeEffort} />
 
                     <ContextSelector value={contextMode} onChange={onChangeContextMode} />
+
+                    {onOpenKnowledgeBase && (
+                        <button
+                            type="button"
+                            onClick={onOpenKnowledgeBase}
+                            className={`inline-flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl text-xs font-medium border transition-colors cursor-pointer shrink-0 ${
+                                selectedDocIds.length > 0
+                                    ? "bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300 shadow-2xs font-semibold"
+                                    : "border-[var(--border)] bg-[var(--surface-bg)] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)]"
+                            }`}
+                            title="Select Knowledge Base documents for this chat"
+                        >
+                            <BookOpenIcon
+                                size={13}
+                                className={
+                                    selectedDocIds.length > 0 ? "text-amber-500" : "opacity-70"
+                                }
+                            />
+                            <span>Knowledge</span>
+                            <span
+                                className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+                                    selectedDocIds.length > 0
+                                        ? "bg-amber-500/20 text-amber-700 dark:text-amber-300 font-bold"
+                                        : "bg-[var(--badge-bg)] text-[var(--text-muted)]"
+                                }`}
+                            >
+                                {selectedDocIds.length}
+                            </span>
+                        </button>
+                    )}
                 </div>
 
                 {/* Bottom Actions Bar */}

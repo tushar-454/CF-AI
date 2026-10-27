@@ -4,8 +4,8 @@ import {
     createConversation,
     createMessage,
     getConversation,
+    getDocument,
     getMessages,
-    listDocuments,
 } from "@/lib/db"
 import { DEFAULT_MODEL_ID } from "@/lib/models"
 import { indexDocument, queryKnowledge } from "@/lib/rag"
@@ -24,6 +24,7 @@ const ChatRequestSchema = z.object({
     model: z.string().optional(),
     effort: z.enum(["low", "medium", "high"]).optional(),
     contextMode: z.enum(["none", "conversation", "knowledge", "files"]).optional(),
+    selectedDocumentIds: z.array(z.string()).optional(),
     attachments: z
         .array(
             z.object({
@@ -66,6 +67,7 @@ export async function POST(req: Request) {
             effort = "medium",
             contextMode = "conversation",
             attachments = [],
+            selectedDocumentIds = [],
         } = parsed.data
 
         let conversationId = parsed.data.conversationId
@@ -134,97 +136,97 @@ export async function POST(req: Request) {
             content: finalUserContent,
         })
 
-        // Handle Knowledge base RAG context
+        // Handle Knowledge base RAG context:
+        // STRICT RULE: Only query Vectorize and inject knowledge base context if the user has
+        // explicitly checked/selected specific document(s) for this chat conversation.
+        // If no documents are selected (the default), DO NOT inject any vector or knowledge context.
         let ragSystemPrompt = ""
-        if (contextMode === "knowledge" || contextMode === "conversation") {
+        const hasSelectedDocs =
+            contextMode !== "none" &&
+            Array.isArray(selectedDocumentIds) &&
+            selectedDocumentIds.length > 0
+
+        if (hasSelectedDocs) {
             try {
                 const appEnv = env as unknown as AppEnv
                 const ai = appEnv.AI
                 const vectorize = appEnv.VECTORIZE
-                let contextChunks: Array<{ name: string; text: string }> = []
+                let contextChunks: Array<{ documentId: string; name: string; text: string }> = []
 
                 if (ai && vectorize) {
-                    const rawChunks = await queryKnowledge(ai, vectorize, message, 8)
-                    // Prioritize chat-specific knowledge, then global knowledge, exclude other chats
-                    const filteredChunks = rawChunks.filter(
-                        (c) => !c.conversationId || c.conversationId === conversationId
+                    const rawChunks = await queryKnowledge(ai, vectorize, message, 15)
+                    // Strict filtering: ONLY retain chunks that belong to the user's selected documents
+                    const matchingChunks = rawChunks.filter(
+                        (c) => c.documentId && selectedDocumentIds.includes(c.documentId)
                     )
 
-                    // In conversation mode, accept chunks if they belong to this chat, or have solid score
-                    const relevantChunks =
-                        contextMode === "knowledge"
-                            ? filteredChunks
-                            : filteredChunks.filter(
-                                  (c) => c.conversationId === conversationId || c.score >= 0.55
-                              )
+                    matchingChunks.sort((a, b) => b.score - a.score)
 
-                    // Sort: conversation-specific chunks first, then by score
-                    relevantChunks.sort((a, b) => {
-                        const aIsChat = a.conversationId === conversationId ? 1 : 0
-                        const bIsChat = b.conversationId === conversationId ? 1 : 0
-                        if (aIsChat !== bIsChat) return bIsChat - aIsChat
-                        return b.score - a.score
-                    })
-
-                    contextChunks = relevantChunks.slice(0, 5).map((c) => ({
+                    contextChunks = matchingChunks.slice(0, 6).map((c) => ({
+                        documentId: c.documentId,
                         name: c.name,
                         text: c.text,
                     }))
                 }
 
-                // Auto-recovery / Fallback: If this conversation has documents in D1,
-                // but no chunks were matched yet (e.g. uploaded before indexing was fixed, or query is generic like "give me text that pdf have")
-                if (conversationId && contextChunks.length === 0) {
+                // If any of the user's selected documents did not have vector chunks returned
+                // (e.g. meta-question like "give me text that pdf have", or small doc),
+                // fetch directly from R2/D1 ONLY for those selected documents!
+                const missingDocIds = selectedDocumentIds.filter(
+                    (id) => !contextChunks.some((c) => c.documentId === id)
+                )
+
+                if (missingDocIds.length > 0) {
                     try {
-                        const chatDocs = await listDocuments(conversationId)
-                        if (chatDocs.length > 0) {
-                            const r2 = getR2()
-                            for (const doc of chatDocs.slice(0, 3)) {
-                                try {
-                                    const obj = await r2.get(doc.r2_key)
-                                    if (obj) {
-                                        const buf = await obj.arrayBuffer()
-                                        let text = ""
-                                        if (isPdfFile(doc.mime, doc.name)) {
-                                            text = await extractPdfText(buf, ai)
-                                        } else {
-                                            text = new TextDecoder().decode(buf)
-                                        }
-                                        if (text.trim()) {
-                                            contextChunks.push({
-                                                name: doc.name,
-                                                text: text.slice(0, 8000),
-                                            })
-                                            // Index into Vectorize in the background so subsequent queries hit the vector cache
-                                            if (ai && vectorize) {
-                                                indexDocument(
-                                                    ai,
-                                                    vectorize,
-                                                    doc.id,
-                                                    doc.name,
-                                                    text,
-                                                    conversationId
-                                                ).catch((e) =>
-                                                    console.warn("Background index failed:", e)
-                                                )
-                                            }
+                        const r2 = getR2()
+                        for (const docId of missingDocIds) {
+                            try {
+                                const doc = await getDocument(docId).catch(() => null)
+                                if (!doc) continue
+                                const obj = await r2.get(doc.r2_key)
+                                if (obj) {
+                                    const buf = await obj.arrayBuffer()
+                                    let text = ""
+                                    if (isPdfFile(doc.mime, doc.name)) {
+                                        text = await extractPdfText(buf, ai)
+                                    } else {
+                                        text = new TextDecoder().decode(buf)
+                                    }
+                                    if (text.trim()) {
+                                        contextChunks.push({
+                                            documentId: doc.id,
+                                            name: doc.name,
+                                            text: text.slice(0, 8000),
+                                        })
+                                        // Index into Vectorize in the background so future queries have vectors
+                                        if (ai && vectorize) {
+                                            indexDocument(
+                                                ai,
+                                                vectorize,
+                                                doc.id,
+                                                doc.name,
+                                                text,
+                                                null
+                                            ).catch((e) =>
+                                                console.warn("Background index failed:", e)
+                                            )
                                         }
                                     }
-                                } catch (docErr) {
-                                    console.warn(`Could not read doc ${doc.name}:`, docErr)
                                 }
+                            } catch (docErr) {
+                                console.warn(`Could not read selected doc ${docId}:`, docErr)
                             }
                         }
-                    } catch (d1Err) {
-                        console.warn("Could not check conversation documents:", d1Err)
+                    } catch (r2Err) {
+                        console.warn("Could not fetch selected documents from storage:", r2Err)
                     }
                 }
 
                 if (contextChunks.length > 0) {
                     const contextText = contextChunks
-                        .map((c, i) => `[Document ${i + 1}: ${c.name}]\n${c.text}`)
+                        .map((c, i) => `[Selected Document ${i + 1}: ${c.name}]\n${c.text}`)
                         .join("\n\n")
-                    ragSystemPrompt = `You have access to the following relevant reference materials from the knowledge base:\n\n${contextText}\n\nUse this information to answer the user accurately and cite the source document name when appropriate.`
+                    ragSystemPrompt = `You have access to the following relevant reference materials from the user's explicitly selected knowledge base documents:\n\n${contextText}\n\nAnswer the user using only the provided information from these selected documents. If the user asks for the text or summary of the selected document, provide it directly from these reference materials.`
                 }
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : String(err)
