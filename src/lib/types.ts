@@ -22,6 +22,7 @@ export interface Attachment {
   size: number;
   r2_key: string;
   isImage: boolean;
+  url?: string;
   textContent?: string;
 }
 

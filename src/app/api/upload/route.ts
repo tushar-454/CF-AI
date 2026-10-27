@@ -137,6 +137,8 @@ export async function POST(req: Request) {
       size: file.size,
       r2_key: r2Key,
       isImage,
+      url: `/api/files/${documentId}`,
+      r2_url: `/api/r2?key=${encodeURIComponent(r2Key)}`,
       status,
       textContent: extractedText ? extractedText.slice(0, 4000) : undefined, // Provide preview/context
     });

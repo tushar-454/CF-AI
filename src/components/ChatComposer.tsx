@@ -132,8 +132,8 @@ export function ChatComposer({
   };
 
   return (
-    <div className="w-full max-w-3xl mx-auto px-2.5 sm:px-4 pb-2 sm:pb-4">
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-bg)] shadow-md transition-all focus-within:ring-2 focus-within:ring-[var(--accent)]/30 focus-within:border-[var(--accent)] overflow-hidden">
+    <div className="w-full max-w-3xl mx-auto px-2.5 sm:px-4 pb-2 sm:pb-4 relative z-10">
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-bg)] shadow-md transition-all focus-within:ring-2 focus-within:ring-[var(--accent)]/30 focus-within:border-[var(--accent)] relative">
         {/* Attachment chips */}
         {attachments.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
@@ -143,7 +143,13 @@ export function ChatComposer({
                 className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs bg-[var(--badge-bg)] border border-[var(--border)] text-[var(--text-primary)] shadow-2xs"
               >
                 {att.isImage ? (
-                  <ImageIcon size={13} className="text-emerald-500 shrink-0" />
+                  <div className="w-5 h-5 rounded overflow-hidden bg-[var(--surface-bg)] shrink-0 border border-[var(--border)]/50">
+                    <img
+                      src={att.url || `/api/files/${att.id}`}
+                      alt={att.name}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
                 ) : (
                   <FileTextIcon size={13} className="text-blue-500 shrink-0" />
                 )}
@@ -173,8 +179,8 @@ export function ChatComposer({
           className="w-full resize-none px-3.5 pt-3 pb-2 sm:px-4 sm:pt-3.5 bg-transparent text-base sm:text-sm text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none scrollbar-none leading-relaxed"
         />
 
-        {/* Selectors Pill Strip (Horizontally Scrollable without wrap breaks) */}
-        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none px-2.5 sm:px-3 py-1.5 border-t border-[var(--border)]/40 bg-[var(--surface-bg)]">
+        {/* Selectors Pill Strip (Horizontally Scrollable on mobile, overflow-visible on desktop) */}
+        <div className="flex items-center gap-1.5 overflow-x-auto sm:overflow-visible scrollbar-none px-2.5 sm:px-3 py-1.5 border-t border-[var(--border)]/40 bg-[var(--surface-bg)] relative z-20">
           <ModelSelector
             models={models}
             selectedModelId={selectedModel}

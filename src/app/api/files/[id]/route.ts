@@ -4,25 +4,68 @@ import { deleteDocumentVectors } from "@/lib/rag";
 import { env } from "cloudflare:workers";
 import { verifyPin } from "@/lib/auth";
 
+function inferMime(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "png": return "image/png";
+    case "jpg":
+    case "jpeg": return "image/jpeg";
+    case "gif": return "image/gif";
+    case "webp": return "image/webp";
+    case "svg": return "image/svg+xml";
+    case "pdf": return "application/pdf";
+    default: return "application/octet-stream";
+  }
+}
+
 export async function GET(_req: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await context.params;
-    const doc = await getDocument(id);
+    const doc = await getDocument(id).catch(() => null);
     const r2 = getR2();
 
-    const r2Key = doc?.r2_key || `uploads/${id}`;
-    const object = await r2.get(r2Key);
+    let r2Key = doc?.r2_key;
+    let object = null;
+
+    if (r2Key) {
+      object = await r2.get(r2Key);
+    }
+
+    if (!object) {
+      object = await r2.get(`uploads/${id}`);
+    }
+
+    if (!object) {
+      object = await r2.get(id);
+    }
+
+    if (!object) {
+      try {
+        const list = await r2.list({ prefix: `uploads/${id}`, limit: 1 });
+        if (list.objects.length > 0) {
+          r2Key = list.objects[0].key;
+          object = await r2.get(r2Key);
+        }
+      } catch {
+        // ignore
+      }
+    }
 
     if (!object) {
       return Response.json({ error: "File not found in storage" }, { status: 404 });
     }
 
+    const filename = doc?.name || r2Key?.split("/").pop() || id;
+    const contentType =
+      doc?.mime ||
+      object.httpMetadata?.contentType ||
+      inferMime(filename);
+
     const headers = new Headers();
-    headers.set("Content-Type", doc?.mime || object.httpMetadata?.contentType || "application/octet-stream");
+    headers.set("Content-Type", contentType);
     if (object.size) {
       headers.set("Content-Length", object.size.toString());
     }
-    const filename = doc?.name || "file";
     headers.set("Content-Disposition", `inline; filename="${encodeURIComponent(filename)}"`);
     headers.set("Cache-Control", "public, max-age=31536000, immutable");
 

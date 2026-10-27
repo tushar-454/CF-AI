@@ -38,20 +38,57 @@ export function ChatMessage({ message, isStreaming = false, onRegenerate }: Chat
         <div className="max-w-[90%] sm:max-w-2xl rounded-2xl px-3.5 py-2.5 sm:px-4 sm:py-3 bg-[var(--user-msg-bg)] text-[var(--text-primary)] border border-[var(--border)] shadow-xs">
           {/* Attachments preview */}
           {message.attachments && message.attachments.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 sm:gap-2 mb-2 pb-2 border-b border-[var(--border)]/60">
-              {message.attachments.map((att) => (
-                <div
-                  key={att.id}
-                  className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs bg-[var(--surface-bg)] border border-[var(--border)] shadow-2xs"
-                >
-                  {att.isImage ? (
-                    <ImageIcon size={13} className="text-emerald-500 shrink-0" />
-                  ) : (
+            <div className="flex flex-wrap gap-2 mb-2 pb-2 border-b border-[var(--border)]/60">
+              {message.attachments.map((att) => {
+                const imageSrc = att.url || `/api/files/${att.id}`;
+                if (att.isImage) {
+                  return (
+                    <a
+                      key={att.id}
+                      href={imageSrc}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group relative flex flex-col rounded-xl overflow-hidden border border-[var(--border)] bg-[var(--surface-bg)] shadow-xs hover:border-[var(--accent)] hover:shadow-md transition-all cursor-pointer"
+                      title={`Click to view full image: ${att.name}`}
+                    >
+                      <div className="w-20 h-20 sm:w-24 sm:h-24 bg-[var(--badge-bg)] overflow-hidden relative flex items-center justify-center">
+                        <img
+                          src={imageSrc}
+                          alt={att.name}
+                          className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-105"
+                          loading="lazy"
+                          onError={(e) => {
+                            // If direct file id fails, try /api/r2 with key fallback
+                            if (att.r2_key && !e.currentTarget.src.includes("/api/r2")) {
+                              e.currentTarget.src = `/api/r2?key=${encodeURIComponent(att.r2_key)}`;
+                            }
+                          }}
+                        />
+                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                          <span className="opacity-0 group-hover:opacity-100 transition-opacity bg-black/60 text-white rounded-full p-1 shadow-xs">
+                            <ImageIcon size={12} />
+                          </span>
+                        </div>
+                      </div>
+                      <div className="px-1.5 py-1 bg-[var(--surface-bg)] border-t border-[var(--border)]/50 max-w-[80px] sm:max-w-[96px]">
+                        <span className="text-[10px] text-[var(--text-muted)] truncate block font-medium" title={att.name}>
+                          {att.name}
+                        </span>
+                      </div>
+                    </a>
+                  );
+                }
+
+                return (
+                  <div
+                    key={att.id}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs bg-[var(--surface-bg)] border border-[var(--border)] shadow-2xs"
+                  >
                     <FileTextIcon size={13} className="text-blue-500 shrink-0" />
-                  )}
-                  <span className="truncate max-w-[120px] sm:max-w-[150px] font-medium">{att.name}</span>
-                </div>
-              ))}
+                    <span className="truncate max-w-[120px] sm:max-w-[150px] font-medium">{att.name}</span>
+                  </div>
+                );
+              })}
             </div>
           )}
           <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
@@ -99,7 +136,7 @@ export function ChatMessage({ message, isStreaming = false, onRegenerate }: Chat
             </button>
 
             {isThinkingOpen && (
-              <div className="p-3 sm:p-3.5 border-t border-[var(--border)] text-[var(--text-muted)] font-mono text-[11px] sm:text-[12px] leading-relaxed whitespace-pre-wrap bg-[var(--surface-bg)] max-h-72 overflow-y-auto">
+              <div className="p-3 sm:p-3.5 border-t border-[var(--border)] text-[var(--text-muted)] font-mono text-[11px] sm:text-[12px] leading-relaxed whitespace-pre-wrap bg-[var(--surface-bg)] max-h-72 overflow-y-auto custom-scrollbar">
                 {message.reasoning}
               </div>
             )}

@@ -17,6 +17,9 @@
   --code-header-bg: #1a1918;
   --code-text: #f5f4f0;
 
+  --scrollbar-thumb: rgba(115, 110, 103, 0.35);
+  --scrollbar-thumb-hover: rgba(194, 65, 12, 0.75);
+
   color-scheme: light;
 }
 
@@ -36,44 +39,93 @@ html.dark {
   --code-bg: #131211;
   --code-header-bg: #1a1918;
   --code-text: #edebe8;
+  --scrollbar-thumb: rgba(158, 155, 149, 0.35);
+  --scrollbar-thumb-hover: rgba(224, 122, 95, 0.75);
 
   color-scheme: dark;
 }
 
+html,
 body {
   margin: 0;
   padding: 0;
+  height: 100%;
+  height: 100dvh;
   background-color: var(--background);
   color: var(--text-primary);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   overflow: hidden;
+  overscroll-behavior: none;
 }
 
-/* Custom scrollbars */
+/* ========================================================
+   GLOBAL SCROLLBAR RULE:
+   Remove / hide scrollbars globally by default across all elements
+   ======================================================== */
+* {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+*::-webkit-scrollbar {
+  display: none !important;
+  width: 0px !important;
+  height: 0px !important;
+}
+
+/* ========================================================
+   CUSTOM SCROLLBAR RULE:
+   Exclusively enabled for chat viewport, chatpdf, and overflowing text
+   ======================================================== */
+.custom-scrollbar,
+.custom-scrollbar-y,
+.scrollbar-custom,
+.scrollbar-thin {
+  scrollbar-width: thin !important;
+  scrollbar-color: var(--scrollbar-thumb) transparent !important;
+  -ms-overflow-style: auto !important;
+}
+
+.custom-scrollbar::-webkit-scrollbar,
+.custom-scrollbar-y::-webkit-scrollbar,
+.scrollbar-custom::-webkit-scrollbar,
 .scrollbar-thin::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  display: block !important;
+  width: 6px !important;
+  height: 6px !important;
 }
 
+.custom-scrollbar::-webkit-scrollbar-track,
+.custom-scrollbar-y::-webkit-scrollbar-track,
+.scrollbar-custom::-webkit-scrollbar-track,
 .scrollbar-thin::-webkit-scrollbar-track {
-  background: transparent;
+  background: transparent !important;
 }
 
+.custom-scrollbar::-webkit-scrollbar-thumb,
+.custom-scrollbar-y::-webkit-scrollbar-thumb,
+.scrollbar-custom::-webkit-scrollbar-thumb,
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 9999px;
+  background-color: var(--scrollbar-thumb) !important;
+  border-radius: 9999px !important;
+  border: 1px solid transparent !important;
+  background-clip: padding-box !important;
+  transition: background-color 0.2s ease-in-out;
 }
 
+.custom-scrollbar::-webkit-scrollbar-thumb:hover,
+.custom-scrollbar-y::-webkit-scrollbar-thumb:hover,
+.scrollbar-custom::-webkit-scrollbar-thumb:hover,
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: var(--text-muted);
+  background-color: var(--scrollbar-thumb-hover) !important;
 }
 
 .scrollbar-none::-webkit-scrollbar {
-  display: none;
+  display: none !important;
 }
 .scrollbar-none {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
+  -ms-overflow-style: none !important;
+  scrollbar-width: none !important;
 }
 
 /* Markdown prose styling */

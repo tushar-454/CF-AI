@@ -1,7 +1,9 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { Conversation } from "@/lib/types";
+import { DailyUsageSummary } from "@/lib/db";
+import { getAuthHeaders } from "@/lib/auth-client";
 import {
   ActivityIcon,
   BookOpenIcon,
@@ -32,6 +34,7 @@ interface SidebarProps {
   onCloseMobile: () => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
+  usageSummary?: DailyUsageSummary | null;
 }
 
 export function Sidebar({
@@ -49,10 +52,26 @@ export function Sidebar({
   onCloseMobile,
   theme,
   onToggleTheme,
+  usageSummary,
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
+  const [localUsage, setLocalUsage] = useState<DailyUsageSummary | null>(null);
+
+  useEffect(() => {
+    if (!usageSummary) {
+      fetch("/api/usage", { headers: getAuthHeaders() })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: unknown) => {
+          const usageData = data as { currentUsage?: DailyUsageSummary } | null;
+          if (usageData?.currentUsage) {
+            setLocalUsage(usageData.currentUsage);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [usageSummary]);
 
   // Group conversations by date
   const groupedConversations = useMemo(() => {
@@ -163,7 +182,7 @@ export function Sidebar({
                       {c.title}
                     </button>
 
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-0.5 sm:gap-1 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity shrink-0">
                       {onCopyLink && (
                         <button
                           type="button"
@@ -171,8 +190,9 @@ export function Sidebar({
                             e.stopPropagation();
                             onCopyLink(c.id);
                           }}
-                          className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-bg)]"
+                          className="p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-bg)] transition-colors cursor-pointer"
                           title="Copy link to chat"
+                          aria-label="Copy link"
                         >
                           <LinkIcon size={13} />
                         </button>
@@ -183,8 +203,9 @@ export function Sidebar({
                           e.stopPropagation();
                           startEditing(c);
                         }}
-                        className="p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-bg)]"
+                        className="p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-bg)] transition-colors cursor-pointer"
                         title="Rename"
+                        aria-label="Rename chat"
                       >
                         <EditIcon size={13} />
                       </button>
@@ -196,8 +217,9 @@ export function Sidebar({
                             onDeleteConversation(c.id);
                           }
                         }}
-                        className="p-1 rounded text-[var(--text-muted)] hover:text-red-500 hover:bg-red-500/10"
+                        className="p-1.5 md:p-1 rounded text-[var(--text-muted)] hover:text-red-500 hover:bg-red-500/10 transition-colors cursor-pointer"
                         title="Delete"
+                        aria-label="Delete chat"
                       >
                         <TrashIcon size={13} />
                       </button>
@@ -271,7 +293,7 @@ export function Sidebar({
       </div>
 
       {/* Conversations List */}
-      <div className="flex-1 overflow-y-auto px-3 py-1 scrollbar-thin">
+      <div className="flex-1 overflow-y-auto px-3 py-1">
         {conversations.length === 0 ? (
           <div className="text-center py-8 text-xs text-[var(--text-muted)]">No chats yet.</div>
         ) : (
@@ -300,21 +322,58 @@ export function Sidebar({
           </span>
         </button>
 
-        {onOpenUsage && (
-          <button
-            type="button"
-            onClick={onOpenUsage}
-            className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-transparent hover:border-[var(--border)] transition-all"
-          >
-            <div className="flex items-center gap-2">
-              <ActivityIcon size={15} className="text-[var(--accent)]" />
-              <span>Usage & Limits</span>
-            </div>
-            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--badge-bg)] text-[var(--text-muted)]">
-              10k Free
-            </span>
-          </button>
-        )}
+        {onOpenUsage && (() => {
+          const usage = usageSummary || localUsage;
+          const limit = usage?.dailyFreeNeuronsLimit ?? 10000;
+          const used = usage?.estimatedNeuronsUsedToday ?? 0;
+          const remaining = usage?.remainingNeuronsToday ?? Math.max(0, limit - used);
+          const percent = usage?.percentUsed ?? (limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0);
+
+          const barColor =
+            percent > 85
+              ? "bg-red-500 dark:bg-red-400"
+              : percent > 60
+              ? "bg-amber-500 dark:bg-amber-400"
+              : "bg-emerald-500 dark:bg-emerald-400";
+
+          return (
+            <button
+              type="button"
+              onClick={onOpenUsage}
+              className="w-full flex flex-col p-2.5 rounded-xl text-xs font-medium text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-transparent hover:border-[var(--border)] transition-all cursor-pointer text-left group"
+              title="Click to view detailed AI usage breakdown and limits"
+            >
+              {/* Top row: Label & % Used */}
+              <div className="w-full flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <ActivityIcon size={15} className="text-[var(--accent)] shrink-0" />
+                  <span className="font-semibold text-xs">Usage & Limits</span>
+                </div>
+                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--badge-bg)] text-[var(--text-muted)] group-hover:text-[var(--text-primary)] transition-colors">
+                  {percent}% used
+                </span>
+              </div>
+
+              {/* Middle row: Progress line bar */}
+              <div className="w-full mt-2 mb-1.5">
+                <div className="w-full h-1.5 bg-[var(--border)]/70 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${barColor}`}
+                    style={{ width: `${Math.max(used > 0 ? 3 : 0, Math.min(100, percent))}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Bottom row: Used & Remaining Neurons */}
+              <div className="w-full flex items-center justify-between text-[10px] text-[var(--text-muted)] font-mono">
+                <span>{used.toLocaleString()} used</span>
+                <span className="font-sans font-medium text-[var(--text-primary)]/80">
+                  {remaining.toLocaleString()} left
+                </span>
+              </div>
+            </button>
+          );
+        })()}
 
         {onLockApp && (
           <button
@@ -345,12 +404,12 @@ export function Sidebar({
 
       {/* Mobile Drawer */}
       {isOpenMobile && (
-        <div className="fixed inset-0 z-50 md:hidden flex">
+        <div className="fixed inset-0 h-dvh z-50 md:hidden flex">
           <div
             className="fixed inset-0 bg-black/50 backdrop-blur-xs transition-opacity"
             onClick={onCloseMobile}
           />
-          <div className="relative z-10 w-72 h-full shadow-2xl">
+          <div className="relative z-10 w-72 h-dvh max-h-dvh shadow-2xl">
             {sidebarContent}
           </div>
         </div>

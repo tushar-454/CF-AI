@@ -60,7 +60,7 @@ if (typeof window !== "undefined") {
             <span class="copy-status-text">Copy code</span>
           </button>
         </div>
-        <pre class="p-4 overflow-x-auto font-mono text-[13px] leading-relaxed m-0"><code>${escapeHtml(text)}</code></pre>
+        <pre class="p-4 overflow-x-auto font-mono text-[13px] leading-relaxed m-0 custom-scrollbar"><code>${escapeHtml(text)}</code></pre>
       </div>
     `;
   };

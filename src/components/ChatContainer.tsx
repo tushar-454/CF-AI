@@ -12,6 +12,7 @@ import { PinLogin } from "./PinLogin";
 import { Toast, ToastMessage } from "./Toast";
 import { ActivityIcon, ArrowDownIcon, BookOpenIcon, CheckIcon, LinkIcon, LockIcon, MenuIcon, SparklesIcon } from "./Icons";
 import { AUTH_HEADER_NAME, AUTH_STORAGE_KEY, getAuthHeaders } from "@/lib/auth-client";
+import { DailyUsageSummary } from "@/lib/db";
 
 const SUGGESTED_PROMPTS = [
   {
@@ -54,6 +55,21 @@ export function ChatContainer() {
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [usageSummary, setUsageSummary] = useState<DailyUsageSummary | null>(null);
+
+  const fetchUsageMetrics = useCallback(async () => {
+    try {
+      const res = await fetch("/api/usage", { headers: getAuthHeaders() });
+      if (res.ok) {
+        const data = (await res.json()) as { currentUsage?: DailyUsageSummary };
+        if (data?.currentUsage) {
+          setUsageSummary(data.currentUsage);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const chatScrollContainerRef = useRef<HTMLDivElement>(null);
@@ -94,6 +110,13 @@ export function ChatContainer() {
       setIsAuthenticated(false);
     }
   }, []);
+
+  // Fetch usage metrics whenever user is authenticated or usage modal closes
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchUsageMetrics();
+    }
+  }, [isAuthenticated, isUsageOpen, fetchUsageMetrics]);
 
   // Initialize theme from localStorage or system preference
   useEffect(() => {
@@ -577,6 +600,7 @@ export function ChatContainer() {
       setStreamingReasoning("");
     } finally {
       abortControllerRef.current = null;
+      fetchUsageMetrics();
     }
   };
 
@@ -611,7 +635,7 @@ export function ChatContainer() {
   // While checking localStorage, show clean background
   if (isAuthenticated === null) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-[var(--background)]">
+      <div className="flex h-dvh w-screen items-center justify-center bg-[var(--background)]">
         <div className="w-8 h-8 rounded-xl bg-[var(--accent)] animate-pulse" />
       </div>
     );
@@ -623,7 +647,7 @@ export function ChatContainer() {
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[var(--background)] text-[var(--text-primary)]">
+    <div className="flex h-dvh w-screen overflow-hidden bg-[var(--background)] text-[var(--text-primary)]">
       {/* Left Sidebar */}
       <Sidebar
         conversations={conversations}
@@ -640,6 +664,7 @@ export function ChatContainer() {
         onCloseMobile={() => setIsMobileSidebarOpen(false)}
         theme={theme}
         onToggleTheme={toggleTheme}
+        usageSummary={usageSummary}
       />
 
       {/* Main Chat Column */}
@@ -658,7 +683,7 @@ export function ChatContainer() {
             <span className="text-xs sm:text-sm font-semibold text-[var(--text-primary)] truncate max-w-[140px] xs:max-w-[200px] sm:max-w-md">
               {activeConversationId
                 ? activeConversationTitle || conversations.find((c) => c.id === activeConversationId)?.title || "Chat"
-                : "Claude Cloudflare AI"}
+                : "Cloudflare AI"}
             </span>
 
             {/* Quick Share / Copy Link button when chat is active (Desktop) */}
@@ -728,7 +753,7 @@ export function ChatContainer() {
         <div
           ref={chatScrollContainerRef}
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto px-2.5 sm:px-4 py-4 sm:py-6 scrollbar-thin relative"
+          className="flex-1 overflow-y-auto px-2.5 sm:px-4 py-4 sm:py-6 custom-scrollbar relative"
         >
           {isLoadingConversation ? (
             <div className="max-w-2xl mx-auto h-full flex flex-col items-center justify-center text-center px-4 py-12">
