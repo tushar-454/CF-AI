@@ -1,6 +1,12 @@
 import { env } from "cloudflare:workers"
 import { EMBEDDING_MODEL_ID } from "./models"
-import { AppEnv, VectorizeIndexBinding, VectorizeMatch, WorkersAi } from "./types"
+import type {
+    AppEnv,
+    VectorizeIndexBinding,
+    VectorizeMatch,
+    VectorizeQueryResult,
+    WorkersAi,
+} from "./types"
 
 export class VectorizeBindingError extends Error {
     constructor(
@@ -156,7 +162,8 @@ export async function queryKnowledge(
     ai: WorkersAi,
     vectorize: VectorizeIndexBinding,
     query: string,
-    topK: number = 5
+    topK: number = 5,
+    selectedDocIds?: string[]
 ): Promise<RetrievedChunk[]> {
     const queryVectors = await getEmbeddings(ai, [query])
     if (!queryVectors || queryVectors.length === 0) {
@@ -164,16 +171,38 @@ export async function queryKnowledge(
     }
 
     const queryVector = queryVectors[0]
-    const searchResult = await vectorize.query(queryVector, {
-        topK,
-        returnMetadata: "all",
-    })
+    let searchResult: VectorizeQueryResult | null = null
+
+    // If specific documents are selected, filter Vectorize query to those document IDs
+    if (selectedDocIds && selectedDocIds.length > 0) {
+        try {
+            const filter =
+                selectedDocIds.length === 1
+                    ? { documentId: selectedDocIds[0] }
+                    : { documentId: { $in: selectedDocIds } }
+            searchResult = await vectorize.query(queryVector, {
+                topK,
+                returnMetadata: "all",
+                filter,
+            })
+        } catch {
+            // Index might not have filterable metadata property configured; fall back to broader query
+            searchResult = null
+        }
+    }
+
+    if (!searchResult) {
+        searchResult = await vectorize.query(queryVector, {
+            topK: selectedDocIds && selectedDocIds.length > 0 ? Math.max(topK, 30) : topK,
+            returnMetadata: "all",
+        })
+    }
 
     if (!searchResult || !Array.isArray(searchResult.matches)) {
         return []
     }
 
-    return searchResult.matches.map((m: VectorizeMatch) => ({
+    const results: RetrievedChunk[] = searchResult.matches.map((m: VectorizeMatch) => ({
         score: m.score,
         documentId: String(m.metadata?.documentId || ""),
         conversationId: String(m.metadata?.conversationId || ""),
@@ -181,6 +210,14 @@ export async function queryKnowledge(
         chunkIndex: Number(m.metadata?.chunkIndex || 0),
         text: String(m.metadata?.text || ""),
     }))
+
+    if (selectedDocIds && selectedDocIds.length > 0) {
+        return results.filter(
+            (r: RetrievedChunk) => r.documentId && selectedDocIds.includes(r.documentId)
+        )
+    }
+
+    return results
 }
 
 /**
@@ -189,11 +226,19 @@ export async function queryKnowledge(
 export async function deleteDocumentVectors(
     vectorize: VectorizeIndexBinding,
     documentId: string,
-    maxChunks: number = 200
+    chunkCount?: number | null
 ): Promise<void> {
     try {
-        const ids = Array.from({ length: maxChunks }, (_, i) => `${documentId}_${i}`)
-        await vectorize.deleteByIds(ids)
+        const count = Math.max(chunkCount && chunkCount > 0 ? chunkCount : 50, 50)
+        const batchSize = 100
+        for (let start = 0; start < count; start += batchSize) {
+            const end = Math.min(start + batchSize, count)
+            const ids: string[] = []
+            for (let i = start; i < end; i++) {
+                ids.push(`${documentId}_${i}`)
+            }
+            await vectorize.deleteByIds(ids)
+        }
     } catch {
         // Vector deletion is best-effort and asynchronous in Vectorize
     }

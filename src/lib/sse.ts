@@ -8,11 +8,24 @@ export interface SSEEvent {
     createdAt?: number
 }
 
-export function formatSSE(data: SSEEvent | string): string {
-    if (typeof data === "string") {
-        return `data: ${data}\n\n`
+export function formatSSE(
+    data: SSEEvent | Record<string, unknown> | string,
+    eventName?: string,
+    id?: number | string
+): string {
+    let out = ""
+    if (id !== undefined) {
+        out += `id: ${id}\n`
     }
-    return `data: ${JSON.stringify(data)}\n\n`
+    if (eventName) {
+        out += `event: ${eventName}\n`
+    }
+    if (typeof data === "string") {
+        out += `data: ${data}\n\n`
+    } else {
+        out += `data: ${JSON.stringify(data)}\n\n`
+    }
+    return out
 }
 
 export function createSSEStream() {

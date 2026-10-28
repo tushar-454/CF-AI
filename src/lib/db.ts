@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers"
-import { AppEnv, Conversation, D1DatabaseBinding, DocumentItem, Message } from "./types"
+import type { AppEnv, Conversation, D1DatabaseBinding, DocumentItem, Message } from "./types"
 
 export class DatabaseBindingError extends Error {
     constructor(
@@ -174,21 +174,21 @@ export async function listDocuments(
         if (conversationId === undefined) {
             const { results } = await db
                 .prepare(
-                    "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents ORDER BY created_at DESC"
+                    "SELECT id, conversation_id, name, r2_key, mime, size, status, stage, progress, error_message, completed_at, chunk_count, created_at FROM documents ORDER BY created_at DESC"
                 )
                 .all<DocumentItem>()
             return results || []
         } else if (conversationId === null) {
             const { results } = await db
                 .prepare(
-                    "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents WHERE conversation_id IS NULL OR conversation_id = '' ORDER BY created_at DESC"
+                    "SELECT id, conversation_id, name, r2_key, mime, size, status, stage, progress, error_message, completed_at, chunk_count, created_at FROM documents WHERE conversation_id IS NULL OR conversation_id = '' ORDER BY created_at DESC"
                 )
                 .all<DocumentItem>()
             return results || []
         } else {
             const { results } = await db
                 .prepare(
-                    "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents WHERE conversation_id = ? ORDER BY created_at DESC"
+                    "SELECT id, conversation_id, name, r2_key, mime, size, status, stage, progress, error_message, completed_at, chunk_count, created_at FROM documents WHERE conversation_id = ? ORDER BY created_at DESC"
                 )
                 .bind(conversationId)
                 .all<DocumentItem>()
@@ -196,13 +196,31 @@ export async function listDocuments(
         }
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        if (msg.includes("no such column: conversation_id")) {
-            const { results } = await db
-                .prepare(
-                    "SELECT id, name, r2_key, mime, size, status, created_at FROM documents ORDER BY created_at DESC"
-                )
-                .all<DocumentItem>()
-            return (results || []).map((row) => ({ ...row, conversation_id: null }))
+        if (msg.includes("no such column")) {
+            try {
+                const { results } = await db
+                    .prepare(
+                        "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents ORDER BY created_at DESC"
+                    )
+                    .all<DocumentItem>()
+                return (results || []).map((row) => ({
+                    ...row,
+                    stage: row.status === "ready" ? "ready" : "upload",
+                    progress: row.status === "ready" ? 100 : 0,
+                }))
+            } catch {
+                const { results } = await db
+                    .prepare(
+                        "SELECT id, name, r2_key, mime, size, status, created_at FROM documents ORDER BY created_at DESC"
+                    )
+                    .all<DocumentItem>()
+                return (results || []).map((row) => ({
+                    ...row,
+                    conversation_id: null,
+                    stage: row.status === "ready" ? "ready" : "upload",
+                    progress: row.status === "ready" ? 100 : 0,
+                }))
+            }
         }
         throw err
     }
@@ -213,7 +231,7 @@ export async function createDocument(doc: DocumentItem, dbOverride?: unknown): P
     try {
         await db
             .prepare(
-                "INSERT INTO documents (id, conversation_id, name, r2_key, mime, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO documents (id, conversation_id, name, r2_key, mime, size, status, stage, progress, error_message, completed_at, chunk_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(
                 doc.id,
@@ -223,22 +241,77 @@ export async function createDocument(doc: DocumentItem, dbOverride?: unknown): P
                 doc.mime,
                 doc.size,
                 doc.status,
+                doc.stage || "upload",
+                doc.progress ?? 0,
+                doc.error_message || null,
+                doc.completed_at || null,
+                doc.chunk_count ?? 0,
                 doc.created_at
             )
             .run()
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         if (
-            msg.includes("has no column named conversation_id") ||
-            msg.includes("table documents has no column")
+            msg.includes("has no column named") ||
+            msg.includes("table documents has no column") ||
+            msg.includes("no such column")
         ) {
-            await db
-                .prepare(
-                    "INSERT INTO documents (id, name, r2_key, mime, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-                )
-                .bind(doc.id, doc.name, doc.r2_key, doc.mime, doc.size, doc.status, doc.created_at)
-                .run()
-            return
+            try {
+                await db
+                    .prepare(
+                        "INSERT INTO documents (id, conversation_id, name, r2_key, mime, size, status, stage, progress, error_message, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    .bind(
+                        doc.id,
+                        doc.conversation_id || null,
+                        doc.name,
+                        doc.r2_key,
+                        doc.mime,
+                        doc.size,
+                        doc.status,
+                        doc.stage || "upload",
+                        doc.progress ?? 0,
+                        doc.error_message || null,
+                        doc.completed_at || null,
+                        doc.created_at
+                    )
+                    .run()
+                return
+            } catch {}
+            try {
+                await db
+                    .prepare(
+                        "INSERT INTO documents (id, conversation_id, name, r2_key, mime, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    .bind(
+                        doc.id,
+                        doc.conversation_id || null,
+                        doc.name,
+                        doc.r2_key,
+                        doc.mime,
+                        doc.size,
+                        doc.status,
+                        doc.created_at
+                    )
+                    .run()
+                return
+            } catch {
+                await db
+                    .prepare(
+                        "INSERT INTO documents (id, name, r2_key, mime, size, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    )
+                    .bind(
+                        doc.id,
+                        doc.name,
+                        doc.r2_key,
+                        doc.mime,
+                        doc.size,
+                        doc.status,
+                        doc.created_at
+                    )
+                    .run()
+                return
+            }
         }
         throw err
     }
@@ -249,24 +322,127 @@ export async function getDocument(id: string, dbOverride?: unknown): Promise<Doc
     try {
         const doc = await db
             .prepare(
-                "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents WHERE id = ?"
+                "SELECT id, conversation_id, name, r2_key, mime, size, status, stage, progress, error_message, completed_at, chunk_count, created_at FROM documents WHERE id = ?"
             )
             .bind(id)
             .first<DocumentItem>()
         return doc || null
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
-        if (msg.includes("no such column: conversation_id")) {
-            const doc = await db
-                .prepare(
-                    "SELECT id, name, r2_key, mime, size, status, created_at FROM documents WHERE id = ?"
-                )
-                .bind(id)
-                .first<DocumentItem>()
-            return doc ? { ...doc, conversation_id: null } : null
+        if (msg.includes("no such column")) {
+            try {
+                const doc = await db
+                    .prepare(
+                        "SELECT id, conversation_id, name, r2_key, mime, size, status, created_at FROM documents WHERE id = ?"
+                    )
+                    .bind(id)
+                    .first<DocumentItem>()
+                return doc
+                    ? {
+                          ...doc,
+                          stage: doc.status === "ready" ? "ready" : "upload",
+                          progress: doc.status === "ready" ? 100 : 0,
+                      }
+                    : null
+            } catch {
+                const doc = await db
+                    .prepare(
+                        "SELECT id, name, r2_key, mime, size, status, created_at FROM documents WHERE id = ?"
+                    )
+                    .bind(id)
+                    .first<DocumentItem>()
+                return doc
+                    ? {
+                          ...doc,
+                          conversation_id: null,
+                          stage: doc.status === "ready" ? "ready" : "upload",
+                          progress: doc.status === "ready" ? 100 : 0,
+                      }
+                    : null
+            }
         }
         throw err
     }
+}
+
+export async function updateDocumentProgress(
+    id: string,
+    updates: {
+        status?: DocumentItem["status"]
+        stage?: DocumentItem["stage"]
+        progress?: number
+        error_message?: string | null
+        completed_at?: number | null
+        chunk_count?: number | null
+    },
+    dbOverride?: unknown
+): Promise<void> {
+    const db = getDb(dbOverride)
+    const setClauses: string[] = []
+    const values: unknown[] = []
+
+    if (updates.status !== undefined) {
+        setClauses.push("status = ?")
+        values.push(updates.status)
+    }
+    if (updates.stage !== undefined) {
+        setClauses.push("stage = ?")
+        values.push(updates.stage)
+    }
+    if (updates.progress !== undefined) {
+        setClauses.push("progress = ?")
+        values.push(updates.progress)
+    }
+    if (updates.error_message !== undefined) {
+        setClauses.push("error_message = ?")
+        values.push(updates.error_message)
+    }
+    if (updates.completed_at !== undefined) {
+        setClauses.push("completed_at = ?")
+        values.push(updates.completed_at)
+    }
+    if (updates.chunk_count !== undefined) {
+        setClauses.push("chunk_count = ?")
+        values.push(updates.chunk_count)
+    }
+
+    if (setClauses.length === 0) return
+
+    values.push(id)
+    try {
+        await db
+            .prepare(`UPDATE documents SET ${setClauses.join(", ")} WHERE id = ?`)
+            .bind(...values)
+            .run()
+    } catch {
+        // Fallback if processing columns are not yet migrated in current DB
+        if (updates.status !== undefined) {
+            try {
+                await db
+                    .prepare("UPDATE documents SET status = ? WHERE id = ?")
+                    .bind(updates.status, id)
+                    .run()
+            } catch {}
+        }
+    }
+}
+
+export async function failDocument(
+    id: string,
+    errorMessage: string,
+    stage: DocumentItem["stage"] = "failed",
+    dbOverride?: unknown
+): Promise<void> {
+    await updateDocumentProgress(
+        id,
+        {
+            status: "failed",
+            stage,
+            error_message: errorMessage,
+            completed_at: Date.now(),
+        },
+        dbOverride
+    )
 }
 
 export async function deleteDocument(id: string, dbOverride?: unknown): Promise<void> {

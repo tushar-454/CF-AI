@@ -1,7 +1,7 @@
 // Application authentication configuration
 // 4-digit PIN for access control retrieved from Cloudflare Worker request context/env
 import { env as workersEnv } from "cloudflare:workers"
-import { AppEnv } from "./types"
+import type { AppEnv } from "./types"
 import { AUTH_HEADER_NAME } from "./auth-client"
 export * from "./auth-client"
 

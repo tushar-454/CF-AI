@@ -1,4 +1,4 @@
-import { ModelInfo } from "./types"
+import type { ModelInfo } from "./types"
 
 export const MODELS: ModelInfo[] = [
     // Fast / Small (Default)

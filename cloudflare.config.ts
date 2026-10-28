@@ -1,16 +1,20 @@
-import { bindings, defineConfig, defineWorker } from "cf/config"
+import { bindings, defineConfig, defineWorker, exports } from "cf/config"
 
 export default defineConfig({
-    accountId: "7ab77eaa396c9a6435e5659a299e07cf",
+    accountId: "84b09cdd14a077b27e00b990e8ac417f",
     worker: defineWorker({
         name: "cf-ai",
-        entrypoint: "vinext/server/fetch-handler",
+        entrypoint: "./worker/index.ts",
         compatibilityDate: "2026-10-27",
         compatibilityFlags: ["nodejs_compat"],
         assets: {
             htmlHandling: "none",
             notFoundHandling: "none",
             runWorkerFirst: ["/*", "!/_next/static/*", "!/*/_next/static/*"],
+        },
+        exports: {
+            PdfProcessingWorkflow: exports.workflow({ name: "pdf-processing-workflow" }),
+            DocumentProgressDO: exports.durableObject({ storage: "sqlite" }),
         },
         env: {
             ASSETS: bindings.assets(),
@@ -20,7 +24,7 @@ export default defineConfig({
             // D1 database binding
             DB: bindings.d1({
                 name: "chatbot-db",
-                id: "52285e7e-0124-4a60-a144-03dc406a11fe",
+                id: "81e1eee3-ec8f-4868-8dab-caa4077b3013",
             }),
             // R2 bucket for file storage
             FILES: bindings.r2({
@@ -29,6 +33,17 @@ export default defineConfig({
             // Vectorize index for RAG (768 dimensions, cosine metric)
             VECTORIZE: bindings.vectorize({
                 name: "chatbot-rag-index",
+            }),
+            // Cloudflare Workflow binding
+            PDF_WORKFLOW: bindings.workflow({
+                name: "pdf-processing-workflow",
+                worker: "cf-ai",
+                exportName: "PdfProcessingWorkflow",
+            }),
+            // Durable Object binding for SSE progress
+            DOCUMENT_PROGRESS_DO: bindings.durableObject({
+                worker: "cf-ai",
+                exportName: "DocumentProgressDO",
             }),
             // Application security PIN secret binding
             APP_PIN: bindings.secret(),

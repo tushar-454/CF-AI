@@ -110,7 +110,7 @@ export async function DELETE(req: Request, context: { params: Promise<{ id: stri
             const appEnv = env as unknown as AppEnv
             const vectorize = appEnv.VECTORIZE
             if (vectorize) {
-                await deleteDocumentVectors(vectorize, id)
+                await deleteDocumentVectors(vectorize, id, doc?.chunk_count)
             }
         } catch (vecErr) {
             console.warn("Could not delete vectors from Vectorize:", vecErr)

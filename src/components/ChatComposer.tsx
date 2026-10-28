@@ -1,13 +1,15 @@
 "use client"
 
-import React, { useRef, useEffect, useState } from "react"
+import { getAuthHeaders } from "@/lib/auth-client"
+import { subscribeToDocumentProgress } from "@/lib/sse-client"
+import { uploadFileDirect } from "@/lib/upload-client"
 import { Attachment, ContextMode, DocumentItem, EffortLevel, ModelInfo } from "@/lib/types"
-import { ModelSelector } from "./ModelSelector"
+import React, { useEffect, useRef, useState } from "react"
 import { ContextSelector } from "./ContextSelector"
 import { EffortSelector } from "./EffortSelector"
+import { BookOpenIcon, FileTextIcon, PaperclipIcon, SendIcon, StopIcon, XIcon } from "./Icons"
+import { ModelSelector } from "./ModelSelector"
 import { VoiceInput } from "./VoiceInput"
-import { BookOpenIcon, PaperclipIcon, SendIcon, StopIcon, XIcon, FileTextIcon } from "./Icons"
-import { getAuthHeaders } from "@/lib/auth-client"
 
 interface ChatComposerProps {
     models: ModelInfo[]
@@ -49,6 +51,7 @@ export function ChatComposer({
     const [isUploading, setIsUploading] = useState(false)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
+    const subscriptionsRef = useRef<Map<string, () => void>>(new Map())
 
     // Auto-resize textarea
     useEffect(() => {
@@ -57,6 +60,17 @@ export function ChatComposer({
             textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 220)}px`
         }
     }, [input])
+
+    // Cleanup subscriptions on unmount
+    useEffect(() => {
+        const subs = subscriptionsRef.current
+        return () => {
+            for (const unsub of subs.values()) {
+                unsub()
+            }
+            subs.clear()
+        }
+    }, [])
 
     const hasImageAttachment = attachments.some((a) => a.isImage)
 
@@ -85,6 +99,19 @@ export function ChatComposer({
             onStopGeneration()
             return
         }
+
+        // Prevent sending while any attached PDF is still being indexed in Workflow
+        const isIndexing = attachments.some(
+            (a) => a.status === "queued" || a.status === "processing"
+        )
+        if (isIndexing) {
+            onNotification?.(
+                "Please wait for PDF processing and indexing to complete before sending.",
+                true
+            )
+            return
+        }
+
         const trimmed = input.trim()
         if (!trimmed && attachments.length === 0) return
 
@@ -109,24 +136,86 @@ export function ChatComposer({
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i]
-            const formData = new FormData()
-            formData.append("file", file)
 
             try {
-                const res = await fetch("/api/upload", {
-                    method: "POST",
-                    headers: getAuthHeaders(),
-                    body: formData,
-                })
+                const result = await uploadFileDirect(file)
+                const doc = result.document
 
-                if (!res.ok) {
-                    const errData = (await res.json().catch(() => ({}))) as { error?: string }
-                    throw new Error(errData.error || `Upload failed for ${file.name}`)
+                const data: Attachment = {
+                    id: doc.id,
+                    name: doc.name,
+                    mime: doc.mime,
+                    size: doc.size,
+                    r2_key: doc.r2_key,
+                    isImage: doc.status === "image",
+                    isPdf: result.isPdf,
+                    status: doc.status,
+                    stage: doc.stage,
+                    progress: doc.progress,
+                    url: `/api/files/${doc.id}`,
                 }
 
-                const data: Attachment = await res.json()
-                setAttachments((prev) => [...prev, data])
-                onNotification?.(`Attached "${file.name}".`)
+                if (data.isPdf && (data.status === "queued" || data.status === "processing")) {
+                    setAttachments((prev) => [
+                        ...prev,
+                        { ...data, status: "queued", stage: "upload", progress: 0 },
+                    ])
+                    onNotification?.(`"${file.name}" uploaded. Cloudflare Workflow processing...`)
+
+                    const unsub = subscribeToDocumentProgress(data.id, {
+                        onProgress: (evt) => {
+                            setAttachments((prev) =>
+                                prev.map((a) =>
+                                    a.id === evt.documentId
+                                        ? {
+                                              ...a,
+                                              status: evt.status,
+                                              stage: evt.stage,
+                                              progress: evt.progress,
+                                          }
+                                        : a
+                                )
+                            )
+                        },
+                        onReady: (evt) => {
+                            setAttachments((prev) =>
+                                prev.map((a) =>
+                                    a.id === evt.documentId
+                                        ? {
+                                              ...a,
+                                              status: "ready",
+                                              stage: "ready",
+                                              progress: 100,
+                                          }
+                                        : a
+                                )
+                            )
+                            onToggleSelectDoc?.(evt.documentId)
+                            onNotification?.(`"${file.name}" indexed and ready.`)
+                            subscriptionsRef.current.get(data.id)?.()
+                            subscriptionsRef.current.delete(data.id)
+                        },
+                        onFailed: (evt) => {
+                            setAttachments((prev) =>
+                                prev.map((a) =>
+                                    a.id === evt.documentId
+                                        ? { ...a, status: "failed", stage: "failed" }
+                                        : a
+                                )
+                            )
+                            onNotification?.(
+                                `Indexing failed for "${file.name}": ${evt.error || "Unknown error"}`,
+                                true
+                            )
+                            subscriptionsRef.current.get(data.id)?.()
+                            subscriptionsRef.current.delete(data.id)
+                        },
+                    })
+                    subscriptionsRef.current.set(data.id, unsub)
+                } else {
+                    setAttachments((prev) => [...prev, data])
+                    onNotification?.(`Attached "${file.name}".`)
+                }
             } catch (err: unknown) {
                 const msg = err instanceof Error ? err.message : "File upload failed"
                 onNotification?.(msg, true)
@@ -137,6 +226,11 @@ export function ChatComposer({
     }
 
     const removeAttachment = (id: string) => {
+        const unsub = subscriptionsRef.current.get(id)
+        if (unsub) {
+            unsub()
+            subscriptionsRef.current.delete(id)
+        }
         setAttachments((prev) => prev.filter((a) => a.id !== id))
     }
 
@@ -146,38 +240,72 @@ export function ChatComposer({
                 {/* Attachment chips */}
                 {attachments.length > 0 && (
                     <div className="flex flex-wrap gap-2 px-3 pt-3">
-                        {attachments.map((att) => (
-                            <div
-                                key={att.id}
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs bg-[var(--badge-bg)] border border-[var(--border)] text-[var(--text-primary)] shadow-2xs"
-                            >
-                                {att.isImage ? (
-                                    <div className="w-5 h-5 rounded overflow-hidden bg-[var(--surface-bg)] shrink-0 border border-[var(--border)]/50">
-                                        <img
-                                            src={att.url || `/api/files/${att.id}`}
-                                            alt={att.name}
-                                            className="w-full h-full object-cover"
-                                        />
-                                    </div>
-                                ) : (
-                                    <FileTextIcon size={13} className="text-blue-500 shrink-0" />
-                                )}
-                                <span className="truncate max-w-[130px] sm:max-w-[160px] font-medium">
-                                    {att.name}
-                                </span>
-                                <span className="text-[10px] text-[var(--text-muted)]">
-                                    ({(att.size / 1024).toFixed(0)}KB)
-                                </span>
-                                <button
-                                    type="button"
-                                    onClick={() => removeAttachment(att.id)}
-                                    className="p-0.5 rounded-full hover:bg-[var(--button-hover)] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                                    aria-label="Remove attachment"
+                        {attachments.map((att) => {
+                            const isProcessing =
+                                att.status === "queued" || att.status === "processing"
+                            const isFailed = att.status === "failed"
+
+                            return (
+                                <div
+                                    key={att.id}
+                                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs border shadow-2xs ${
+                                        isProcessing
+                                            ? "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300"
+                                            : isFailed
+                                              ? "bg-red-500/10 border-red-500/30 text-red-600 dark:text-red-400"
+                                              : "bg-[var(--badge-bg)] border-[var(--border)] text-[var(--text-primary)]"
+                                    }`}
                                 >
-                                    <XIcon size={12} />
-                                </button>
-                            </div>
-                        ))}
+                                    {isProcessing ? (
+                                        <div
+                                            className="w-3.5 h-3.5 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin shrink-0"
+                                            title="Processing via Cloudflare Workflow..."
+                                        />
+                                    ) : isFailed ? (
+                                        <span className="text-red-500 font-bold shrink-0 text-xs">
+                                            !
+                                        </span>
+                                    ) : att.isImage ? (
+                                        <div className="w-5 h-5 rounded overflow-hidden bg-[var(--surface-bg)] shrink-0 border border-[var(--border)]/50">
+                                            <img
+                                                src={att.url || `/api/files/${att.id}`}
+                                                alt={att.name}
+                                                className="w-full h-full object-cover"
+                                            />
+                                        </div>
+                                    ) : (
+                                        <FileTextIcon
+                                            size={13}
+                                            className="text-blue-500 shrink-0"
+                                        />
+                                    )}
+                                    <span className="truncate max-w-[130px] sm:max-w-[160px] font-medium">
+                                        {att.name}
+                                    </span>
+                                    {isProcessing ? (
+                                        <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                                            ({att.progress ?? 0}%)
+                                        </span>
+                                    ) : isFailed ? (
+                                        <span className="text-[10px] text-red-500 font-semibold">
+                                            (Failed)
+                                        </span>
+                                    ) : (
+                                        <span className="text-[10px] text-[var(--text-muted)]">
+                                            ({(att.size / 1024).toFixed(0)}KB)
+                                        </span>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => removeAttachment(att.id)}
+                                        className="p-0.5 rounded-full hover:bg-[var(--button-hover)] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                                        aria-label="Remove attachment"
+                                    >
+                                        <XIcon size={12} />
+                                    </button>
+                                </div>
+                            )
+                        })}
                     </div>
                 )}
 

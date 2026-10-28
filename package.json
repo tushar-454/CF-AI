@@ -42,6 +42,7 @@
         "deploy": "node scripts/deploy.mjs",
         "preview": "npm run build && npm run start --",
         "cf-typegen": "cf workers types",
+        "test": "node --experimental-strip-types --loader ./tests/cf-loader.mjs --test tests/**/*.test.mjs",
         "lint": "eslint .",
         "lint:fix": "eslint . --fix",
         "format": "prettier --write .",

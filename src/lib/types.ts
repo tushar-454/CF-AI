@@ -25,6 +25,9 @@ export interface Attachment {
     isPdf?: boolean
     url?: string
     textContent?: string
+    status?: DocumentStatus
+    stage?: DocumentStage
+    progress?: number
 }
 
 export interface Message {
@@ -48,6 +51,23 @@ export interface Conversation {
     messages?: Message[]
 }
 
+export type DocumentStatus = "queued" | "processing" | "ready" | "failed" | "image" | "error"
+export type DocumentStage =
+    "upload" | "extraction" | "chunking" | "embedding" | "indexing" | "ready" | "failed"
+
+export interface DocumentProgressEvent {
+    documentId: string
+    status: DocumentStatus
+    stage: DocumentStage
+    progress: number
+    message?: string
+    error?: string
+    completedAt?: number
+    timestamp: number
+    chunksIndexed?: number
+    totalChunks?: number
+}
+
 export interface DocumentItem {
     id: string
     conversation_id?: string | null
@@ -55,8 +75,42 @@ export interface DocumentItem {
     r2_key: string
     mime: string
     size: number
-    status: "ready" | "processing" | "error" | "image"
+    status: DocumentStatus
+    stage?: DocumentStage
+    progress?: number
+    error_message?: string | null
+    completed_at?: number | null
+    chunk_count?: number | null
     created_at: number
+}
+
+export interface UploadInitRequest {
+    filename: string
+    mime: string
+    size: number
+    conversationId?: string | null
+}
+
+export interface UploadInitResponse {
+    mode: "presigned" | "stream"
+    documentId: string
+    r2Key: string
+    uploadUrl: string
+    headers?: Record<string, string>
+    maxSizeBytes: number
+}
+
+export interface UploadCompleteRequest {
+    documentId: string
+    filename: string
+    conversationId?: string | null
+    mime?: string
+}
+
+export interface UploadCompleteResponse {
+    document: DocumentItem
+    isPdf: boolean
+    progressUrl?: string
 }
 
 export interface ChatRequestBody {
@@ -143,11 +197,30 @@ export interface VectorizeIndexBinding {
     deleteByIds(ids: string[]): Promise<unknown>
 }
 
+export interface WorkflowInstanceBinding {
+    create: (options: { id?: string; params: unknown }) => Promise<{ id: string }>
+    get: (id: string) => Promise<{
+        status: () => Promise<{ status: string; output?: unknown; error?: unknown }>
+    }>
+}
+
+export interface DurableObjectStubBinding {
+    fetch: (request: Request | string, init?: RequestInit) => Promise<Response>
+    reportProgress?: (event: DocumentProgressEvent) => Promise<void>
+}
+
+export interface DurableObjectNamespaceBinding {
+    idFromName: (name: string) => unknown
+    get: (id: unknown) => DurableObjectStubBinding
+}
+
 export interface AppEnv {
     AI?: WorkersAi
     DB?: D1DatabaseBinding
     FILES?: R2BucketBinding
     VECTORIZE?: VectorizeIndexBinding
+    PDF_WORKFLOW?: WorkflowInstanceBinding
+    DOCUMENT_PROGRESS_DO?: DurableObjectNamespaceBinding
     ASSETS?: unknown
     IMAGES?: unknown
     APP_PIN?: string

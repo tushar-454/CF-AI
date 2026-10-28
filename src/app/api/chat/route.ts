@@ -1,4 +1,4 @@
-import { acceptModelAgreement, getR2, streamChat } from "@/lib/ai"
+import { acceptModelAgreement, streamChat } from "@/lib/ai"
 import { verifyPin } from "@/lib/auth"
 import {
     createConversation,
@@ -8,8 +8,7 @@ import {
     getMessages,
 } from "@/lib/db"
 import { DEFAULT_MODEL_ID } from "@/lib/models"
-import { indexDocument, queryKnowledge } from "@/lib/rag"
-import { isPdfFile, extractPdfText } from "@/lib/pdf"
+import { queryKnowledge } from "@/lib/rag"
 import { createSSEStream, SSE_HEADERS } from "@/lib/sse"
 import { AppEnv } from "@/lib/types"
 import { env } from "cloudflare:workers"
@@ -158,71 +157,34 @@ export async function POST(req: Request) {
                 let contextChunks: Array<{ documentId: string; name: string; text: string }> = []
 
                 if (ai && vectorize) {
-                    const rawChunks = await queryKnowledge(ai, vectorize, message, 15)
-                    // Strict filtering: ONLY retain chunks that belong to the user's selected documents
-                    const matchingChunks = rawChunks.filter(
-                        (c) => c.documentId && selectedDocumentIds.includes(c.documentId)
+                    const rawChunks = await queryKnowledge(
+                        ai,
+                        vectorize,
+                        message,
+                        15,
+                        selectedDocumentIds
                     )
+                    rawChunks.sort((a, b) => b.score - a.score)
 
-                    matchingChunks.sort((a, b) => b.score - a.score)
-
-                    contextChunks = matchingChunks.slice(0, 6).map((c) => ({
+                    contextChunks = rawChunks.slice(0, 6).map((c) => ({
                         documentId: c.documentId,
                         name: c.name,
                         text: c.text,
                     }))
                 }
 
-                // If any of the user's selected documents did not have vector chunks returned
-                // (e.g. meta-question like "give me text that pdf have", or small doc),
-                // fetch directly from R2/D1 ONLY for those selected documents!
-                const missingDocIds = selectedDocumentIds.filter(
-                    (id) => !contextChunks.some((c) => c.documentId === id)
-                )
-
-                if (missingDocIds.length > 0) {
-                    try {
-                        const r2 = getR2()
-                        for (const docId of missingDocIds) {
-                            try {
-                                const doc = await getDocument(docId).catch(() => null)
-                                if (!doc) continue
-                                const obj = await r2.get(doc.r2_key)
-                                if (obj) {
-                                    const buf = await obj.arrayBuffer()
-                                    let text = ""
-                                    if (isPdfFile(doc.mime, doc.name)) {
-                                        text = await extractPdfText(buf, ai)
-                                    } else {
-                                        text = new TextDecoder().decode(buf)
-                                    }
-                                    if (text.trim()) {
-                                        contextChunks.push({
-                                            documentId: doc.id,
-                                            name: doc.name,
-                                            text: text.slice(0, 8000),
-                                        })
-                                        // Index into Vectorize in the background so future queries have vectors
-                                        if (ai && vectorize) {
-                                            indexDocument(
-                                                ai,
-                                                vectorize,
-                                                doc.id,
-                                                doc.name,
-                                                text,
-                                                null
-                                            ).catch((e) =>
-                                                console.warn("Background index failed:", e)
-                                            )
-                                        }
-                                    }
-                                }
-                            } catch (docErr) {
-                                console.warn(`Could not read selected doc ${docId}:`, docErr)
-                            }
+                // If no chunks were retrieved and some selected documents are still indexing,
+                // inform the assistant gracefully without performing synchronous PDF parsing in the chat route
+                if (contextChunks.length === 0) {
+                    const pendingDocs: string[] = []
+                    for (const docId of selectedDocumentIds) {
+                        const doc = await getDocument(docId).catch(() => null)
+                        if (doc && (doc.status === "queued" || doc.status === "processing")) {
+                            pendingDocs.push(doc.name)
                         }
-                    } catch (r2Err) {
-                        console.warn("Could not fetch selected documents from storage:", r2Err)
+                    }
+                    if (pendingDocs.length > 0) {
+                        ragSystemPrompt = `You are a helpful AI assistant. Note: The user has selected documents that are currently still being processed and indexed in the background: ${pendingDocs.join(", ")}. If the user asks about content from those documents, let them know that indexing is completing in the background.`
                     }
                 }
 

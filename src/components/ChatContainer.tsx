@@ -1,6 +1,8 @@
 "use client"
 
-import React, { useState, useEffect, useRef, useCallback } from "react"
+import { AUTH_HEADER_NAME, AUTH_STORAGE_KEY, getAuthHeaders } from "@/lib/auth-client"
+import { DailyUsageSummary } from "@/lib/db"
+import { DEFAULT_MODEL_ID, MODELS } from "@/lib/models"
 import {
     Attachment,
     ContextMode,
@@ -10,14 +12,9 @@ import {
     Message,
     ModelInfo,
 } from "@/lib/types"
-import { DEFAULT_MODEL_ID, MODELS } from "@/lib/models"
-import { Sidebar } from "./Sidebar"
-import { ChatMessage } from "./ChatMessage"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { ChatComposer } from "./ChatComposer"
-import { KnowledgeBaseModal } from "./KnowledgeBaseModal"
-import { UsageModal } from "./UsageModal"
-import { PinLogin } from "./PinLogin"
-import { Toast, ToastMessage } from "./Toast"
+import { ChatMessage } from "./ChatMessage"
 import {
     ActivityIcon,
     ArrowDownIcon,
@@ -28,8 +25,11 @@ import {
     MenuIcon,
     SparklesIcon,
 } from "./Icons"
-import { AUTH_HEADER_NAME, AUTH_STORAGE_KEY, getAuthHeaders } from "@/lib/auth-client"
-import { DailyUsageSummary } from "@/lib/db"
+import { KnowledgeBaseModal } from "./KnowledgeBaseModal"
+import { PinLogin } from "./PinLogin"
+import { Sidebar } from "./Sidebar"
+import { Toast, ToastMessage } from "./Toast"
+import { UsageModal } from "./UsageModal"
 
 const SUGGESTED_PROMPTS = [
     {
@@ -502,7 +502,11 @@ export function ChatContainer() {
     }
 
     // Send message
-    const handleSendMessage = async (text: string, attachments: Attachment[] = []) => {
+    const handleSendMessage = async (
+        text: string,
+        attachments: Attachment[] = [],
+        extraDocIds: string[] = []
+    ) => {
         if (isStreaming) return
 
         const promptTimestamp = Date.now()
@@ -526,6 +530,8 @@ export function ChatContainer() {
         const controller = new AbortController()
         abortControllerRef.current = controller
 
+        const docIdsToSend = Array.from(new Set([...activeSelectedDocIds, ...extraDocIds]))
+
         try {
             const res = await fetch("/api/chat", {
                 method: "POST",
@@ -537,7 +543,7 @@ export function ChatContainer() {
                     effort,
                     contextMode,
                     attachments,
-                    selectedDocumentIds: activeSelectedDocIds,
+                    selectedDocumentIds: docIdsToSend,
                     createdAt: promptTimestamp,
                 }),
                 signal: controller.signal,
@@ -721,6 +727,33 @@ export function ChatContainer() {
             fetchUsageMetrics()
         }
     }
+
+    const handleSendMessageRef = useRef(handleSendMessage)
+    handleSendMessageRef.current = handleSendMessage
+
+    const autoAttachedDocIdsRef = useRef<Set<string>>(new Set())
+
+    const handleDocumentProcessedAndReady = useCallback(
+        (doc: DocumentItem, targetChatId?: string) => {
+            if (autoAttachedDocIdsRef.current.has(doc.id)) return
+            autoAttachedDocIdsRef.current.add(doc.id)
+
+            // Update knowledge base catalog in state
+            setAllKnowledgeDocs((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)])
+
+            // If a specific conversation was targeted, associate the document with it
+            if (targetChatId) {
+                setSelectedDocIdsByChat((prev) => {
+                    const current = prev[targetChatId] || []
+                    return {
+                        ...prev,
+                        [targetChatId]: current.includes(doc.id) ? current : [...current, doc.id],
+                    }
+                })
+            }
+        },
+        []
+    )
 
     const handleRegenerate = () => {
         if (isStreaming || messages.length === 0) return
@@ -1010,6 +1043,8 @@ export function ChatContainer() {
                 onSelectAllDocs={handleSelectAllDocs}
                 onClearSelectedDocs={handleClearSelectedDocs}
                 onDocumentsLoaded={setAllKnowledgeDocs}
+                onDocumentProcessedAndReady={handleDocumentProcessedAndReady}
+                activeConversationId={activeConversationId || undefined}
             />
 
             {/* Usage & Limits Modal */}

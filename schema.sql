@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS documents (
   mime TEXT NOT NULL,
   size INTEGER NOT NULL,
   status TEXT NOT NULL,
+  stage TEXT DEFAULT 'upload',
+  progress INTEGER DEFAULT 0,
+  error_message TEXT,
+  completed_at INTEGER,
+  chunk_count INTEGER DEFAULT 0,
   created_at INTEGER NOT NULL,
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );

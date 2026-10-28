@@ -1,7 +1,10 @@
 "use client"
 
-import React, { useState, useEffect, useRef, useCallback } from "react"
+import { getAuthHeaders } from "@/lib/auth-client"
+import { subscribeToDocumentProgress } from "@/lib/sse-client"
 import { DocumentItem } from "@/lib/types"
+import { uploadFileDirect } from "@/lib/upload-client"
+import { useCallback, useEffect, useRef, useState } from "react"
 import {
     AlertCircleIcon,
     BookOpenIcon,
@@ -14,7 +17,6 @@ import {
     TrashIcon,
     XIcon,
 } from "./Icons"
-import { getAuthHeaders } from "@/lib/auth-client"
 
 interface KnowledgeBaseModalProps {
     isOpen: boolean
@@ -25,6 +27,8 @@ interface KnowledgeBaseModalProps {
     onSelectAllDocs: (ids: string[]) => void
     onClearSelectedDocs: () => void
     onDocumentsLoaded?: (docs: DocumentItem[]) => void
+    onDocumentProcessedAndReady?: (doc: DocumentItem, targetChatId?: string) => void
+    activeConversationId?: string
 }
 
 export function KnowledgeBaseModal({
@@ -36,6 +40,7 @@ export function KnowledgeBaseModal({
     onSelectAllDocs,
     onClearSelectedDocs,
     onDocumentsLoaded,
+    activeConversationId,
 }: KnowledgeBaseModalProps) {
     const [documents, setDocuments] = useState<DocumentItem[]>([])
     const [isLoading, setIsLoading] = useState(false)
@@ -44,6 +49,7 @@ export function KnowledgeBaseModal({
 
     const fileInputRef = useRef<HTMLInputElement>(null)
     const selectAllRef = useRef<HTMLInputElement>(null)
+    const subscriptionsRef = useRef<Map<string, () => void>>(new Map())
 
     const loadDocuments = useCallback(async () => {
         setIsLoading(true)
@@ -72,6 +78,98 @@ export function KnowledgeBaseModal({
         }
     }, [isOpen, loadDocuments])
 
+    const attachProgressSubscription = useCallback(
+        (docId: string, docName: string) => {
+            if (subscriptionsRef.current.has(docId)) return
+
+            const unsubscribe = subscribeToDocumentProgress(docId, {
+                onProgress: (evt) => {
+                    setDocuments((prev) =>
+                        prev.map((d) =>
+                            d.id === evt.documentId
+                                ? {
+                                      ...d,
+                                      status: evt.status,
+                                      stage: evt.stage,
+                                      progress: evt.progress,
+                                  }
+                                : d
+                        )
+                    )
+                },
+                onReady: (evt) => {
+                    setDocuments((prev) =>
+                        prev.map((d) =>
+                            d.id === evt.documentId
+                                ? {
+                                      ...d,
+                                      status: "ready",
+                                      stage: "ready",
+                                      progress: 100,
+                                      completed_at: evt.completedAt || Date.now(),
+                                  }
+                                : d
+                        )
+                    )
+
+                    onNotification?.(`"${docName}" indexed successfully into Knowledge Base.`)
+
+                    const unsub = subscriptionsRef.current.get(docId)
+                    unsub?.()
+                    subscriptionsRef.current.delete(docId)
+                },
+                onFailed: (evt) => {
+                    setDocuments((prev) =>
+                        prev.map((d) =>
+                            d.id === evt.documentId
+                                ? {
+                                      ...d,
+                                      status: "failed",
+                                      stage: evt.stage,
+                                      error_message: evt.error || "Processing failed",
+                                  }
+                                : d
+                        )
+                    )
+                    onNotification?.(
+                        `Processing failed for "${docName}": ${evt.error || "Unknown error"}`,
+                        true
+                    )
+                    const unsub = subscriptionsRef.current.get(docId)
+                    unsub?.()
+                    subscriptionsRef.current.delete(docId)
+                },
+                onError: (err) => {
+                    console.warn(`[SSE] Error for document ${docId}:`, err)
+                },
+            })
+
+            subscriptionsRef.current.set(docId, unsubscribe)
+        },
+        [onNotification]
+    )
+
+    // Cleanup all subscriptions on unmount
+    useEffect(() => {
+        const subs = subscriptionsRef.current
+        return () => {
+            for (const unsub of subs.values()) {
+                unsub()
+            }
+            subs.clear()
+        }
+    }, [])
+
+    // Re-attach subscriptions to any existing queued/processing documents on dialog open
+    useEffect(() => {
+        if (!isOpen) return
+        for (const doc of documents) {
+            if (doc.status === "queued" || doc.status === "processing") {
+                attachProgressSubscription(doc.id, doc.name)
+            }
+        }
+    }, [isOpen, documents, attachProgressSubscription])
+
     const totalCount = documents.length
     const selectedInDocs = documents.filter((d) => selectedDocIds.includes(d.id))
     const selectedCount = selectedInDocs.length
@@ -88,7 +186,7 @@ export function KnowledgeBaseModal({
         if (isAllSelected) {
             onClearSelectedDocs()
         } else {
-            onSelectAllDocs(documents.map((d) => d.id))
+            onSelectAllDocs(documents.filter((d) => d.status === "ready").map((d) => d.id))
         }
     }
 
@@ -124,38 +222,52 @@ export function KnowledgeBaseModal({
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i]
-            const formData = new FormData()
-            formData.append("file", file)
 
             try {
-                const res = await fetch("/api/upload", {
-                    method: "POST",
-                    headers: getAuthHeaders(),
-                    body: formData,
-                })
+                const result = await uploadFileDirect(file, activeConversationId)
+                const doc = result.document
 
-                if (!res.ok) {
-                    const errData = (await res.json().catch(() => ({}))) as { error?: string }
-                    throw new Error(errData.error || `Upload failed for ${file.name}`)
+                if (result.isPdf && doc.status === "queued") {
+                    setDocuments((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)])
+                    onNotification?.(`"${file.name}" uploaded. Cloudflare Workflow processing...`)
+                    attachProgressSubscription(doc.id, file.name)
+                } else {
+                    // Non-PDF file (instant ready or image)
+                    setDocuments((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)])
+                    onNotification?.(`Indexed "${file.name}" into Knowledge Base.`)
+                    loadDocuments()
                 }
-
-                const data = (await res.json()) as { id?: string }
-                // Automatically select newly uploaded document for this chat session
-                if (data?.id) {
-                    onToggleSelectDoc(data.id)
-                }
-                onNotification?.(
-                    `Indexed "${file.name}" to Global Knowledge Base and selected for this chat.`
-                )
             } catch (err: unknown) {
-                const msg = err instanceof Error ? err.message : "Upload failed"
+                const msg = err instanceof Error ? err.message : `Upload failed for ${file.name}`
                 setErrorMessage(msg)
                 onNotification?.(msg, true)
             }
         }
 
         setIsUploading(false)
-        loadDocuments()
+    }
+
+    const getStageTitle = (stage?: DocumentItem["stage"], progress?: number) => {
+        switch (stage) {
+            case "upload":
+                return "Uploading..."
+            case "extraction":
+                return "Extracting text layer..."
+            case "chunking":
+                return "Chunking document text..."
+            case "embedding":
+                return "Computing vector embeddings..."
+            case "indexing":
+                return "Indexing into Vectorize..."
+            case "ready":
+                return "Ready"
+            case "failed":
+                return "Processing failed"
+            default:
+                return progress !== undefined && progress > 0
+                    ? `Processing (${progress}%)...`
+                    : "Queued for Workflow..."
+        }
     }
 
     if (!isOpen) return null
@@ -175,12 +287,12 @@ export function KnowledgeBaseModal({
                                     Global Knowledge Base
                                 </h2>
                                 <span className="hidden xs:inline-flex text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-                                    Vectorize RAG
+                                    Cloudflare Workflow RAG
                                 </span>
                             </div>
                             <p className="text-[11px] sm:text-xs text-[var(--text-muted)] truncate">
-                                All documents are stored globally • Check the PDFs you want active
-                                for this chat
+                                Stored globally in R2 • Indexed with Vectorize • Auto-attaches to
+                                active chat
                             </p>
                         </div>
                     </div>
@@ -202,8 +314,7 @@ export function KnowledgeBaseModal({
                             <strong className="text-[var(--text-primary)] font-medium">
                                 Active Chat Filter:
                             </strong>{" "}
-                            By default, no PDFs are selected. Only checked documents are used for
-                            vector search.
+                            Only checked documents are retrieved by Vectorize during conversation.
                         </span>
                     </div>
                     {selectedCount > 0 ? (
@@ -236,12 +347,12 @@ export function KnowledgeBaseModal({
                         />
                         <p className="text-xs sm:text-sm font-semibold text-[var(--text-primary)]">
                             {isUploading
-                                ? "Uploading, Extracting & Vectorizing document..."
+                                ? "Uploading to R2 storage..."
                                 : "Click or drag files to add to Global Knowledge Base"}
                         </p>
                         <p className="text-[11px] sm:text-xs text-[var(--text-muted)] mt-1">
-                            Supports PDF (text extraction & vectorizing), Markdown, TXT, Code, JSON,
-                            CSV (Max 10 MB).
+                            PDFs are processed via Cloudflare Workflow & Vectorize with live SSE
+                            progress updates (Max 10 MB).
                         </p>
                     </div>
 
@@ -320,8 +431,8 @@ export function KnowledgeBaseModal({
                                 No documents in Global Knowledge Base
                             </p>
                             <p className="text-[11px] sm:text-xs text-[var(--text-muted)] max-w-sm mx-auto mb-4">
-                                Upload PDFs or text reference files above. Once uploaded, you can
-                                select which ones to use for any chat conversation.
+                                Upload PDFs to run the Cloudflare Workflow processing pipeline. Once
+                                ready, documents automatically attach to your active conversation.
                             </p>
                             <button
                                 type="button"
@@ -338,28 +449,50 @@ export function KnowledgeBaseModal({
                             const isPdf =
                                 doc.mime === "application/pdf" ||
                                 doc.name.toLowerCase().endsWith(".pdf")
+                            const isProcessing =
+                                doc.status === "queued" || doc.status === "processing"
+                            const isFailed = doc.status === "failed"
 
                             return (
                                 <div
                                     key={doc.id}
-                                    onClick={() => onToggleSelectDoc(doc.id)}
-                                    className={`group flex items-center justify-between p-3 rounded-xl border transition-all text-sm cursor-pointer select-none ${
-                                        isChecked
-                                            ? "border-emerald-500/40 bg-emerald-500/5 shadow-xs"
-                                            : "border-[var(--border)] bg-[var(--surface-bg)] hover:bg-[var(--sidebar-bg)]"
+                                    onClick={() => {
+                                        if (!isProcessing && !isFailed) {
+                                            onToggleSelectDoc(doc.id)
+                                        }
+                                    }}
+                                    className={`group flex items-center justify-between p-3 rounded-xl border transition-all text-sm select-none ${
+                                        isProcessing
+                                            ? "border-amber-500/30 bg-amber-500/5 cursor-wait"
+                                            : isFailed
+                                              ? "border-red-500/30 bg-red-500/5 cursor-default"
+                                              : isChecked
+                                                ? "border-emerald-500/40 bg-emerald-500/5 shadow-xs cursor-pointer"
+                                                : "border-[var(--border)] bg-[var(--surface-bg)] hover:bg-[var(--sidebar-bg)] cursor-pointer"
                                     }`}
                                 >
-                                    {/* Left: Checkbox + Icon + Details */}
-                                    <div className="flex items-center gap-3 min-w-0 pr-3">
-                                        <input
-                                            type="checkbox"
-                                            id={`doc-checkbox-${doc.id}`}
-                                            checked={isChecked}
-                                            onChange={() => onToggleSelectDoc(doc.id)}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="w-4 h-4 rounded border-[var(--border)] text-emerald-600 focus:ring-emerald-500 cursor-pointer accent-emerald-600 shrink-0"
-                                            aria-label={`Select ${doc.name} for current chat`}
-                                        />
+                                    {/* Left: Checkbox / Spinner + Icon + Details */}
+                                    <div className="flex items-center gap-3 min-w-0 pr-3 flex-1">
+                                        {isProcessing ? (
+                                            <div
+                                                className="w-4 h-4 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin shrink-0"
+                                                title="Processing via Cloudflare Workflow..."
+                                            />
+                                        ) : isFailed ? (
+                                            <div className="text-red-500 shrink-0">
+                                                <AlertCircleIcon size={16} />
+                                            </div>
+                                        ) : (
+                                            <input
+                                                type="checkbox"
+                                                id={`doc-checkbox-${doc.id}`}
+                                                checked={isChecked}
+                                                onChange={() => onToggleSelectDoc(doc.id)}
+                                                onClick={(e) => e.stopPropagation()}
+                                                className="w-4 h-4 rounded border-[var(--border)] text-emerald-600 focus:ring-emerald-500 cursor-pointer accent-emerald-600 shrink-0"
+                                                aria-label={`Select ${doc.name} for current chat`}
+                                            />
+                                        )}
 
                                         <div className="shrink-0 p-1.5 rounded-lg bg-[var(--badge-bg)] text-[var(--text-muted)]">
                                             {isPdf ? (
@@ -373,7 +506,7 @@ export function KnowledgeBaseModal({
                                             )}
                                         </div>
 
-                                        <div className="min-w-0">
+                                        <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-1.5">
                                                 <p className="font-medium text-[var(--text-primary)] truncate text-xs sm:text-sm">
                                                     {doc.name}
@@ -383,20 +516,65 @@ export function KnowledgeBaseModal({
                                                         PDF
                                                     </span>
                                                 )}
+                                                {isProcessing && (
+                                                    <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30 shrink-0 animate-pulse">
+                                                        {doc.progress ?? 0}%
+                                                    </span>
+                                                )}
                                             </div>
-                                            <div className="flex items-center gap-2 text-[10px] sm:text-xs text-[var(--text-muted)] mt-0.5">
-                                                <span>{(doc.size / 1024).toFixed(1)} KB</span>
-                                                <span>•</span>
-                                                <span>
-                                                    {new Date(doc.created_at).toLocaleDateString()}
-                                                </span>
-                                            </div>
+
+                                            {isProcessing ? (
+                                                <div className="mt-1">
+                                                    <div className="flex items-center justify-between text-[10px] text-amber-600 dark:text-amber-400 font-medium">
+                                                        <span>
+                                                            {getStageTitle(doc.stage, doc.progress)}
+                                                        </span>
+                                                    </div>
+                                                    <div className="w-full max-w-xs bg-[var(--border)]/60 rounded-full h-1.5 mt-1 overflow-hidden">
+                                                        <div
+                                                            className="bg-[var(--accent)] h-1.5 rounded-full transition-all duration-300 ease-out"
+                                                            style={{
+                                                                width: `${Math.max(8, Math.min(100, doc.progress ?? 0))}%`,
+                                                            }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            ) : isFailed ? (
+                                                <p className="text-[10px] sm:text-xs text-red-600 dark:text-red-400 mt-0.5 truncate">
+                                                    {doc.error_message ||
+                                                        "Workflow pipeline failed"}
+                                                </p>
+                                            ) : (
+                                                <div className="flex items-center gap-2 text-[10px] sm:text-xs text-[var(--text-muted)] mt-0.5">
+                                                    {doc.size > 0 && (
+                                                        <>
+                                                            <span>
+                                                                {(doc.size / 1024).toFixed(1)} KB
+                                                            </span>
+                                                            <span>•</span>
+                                                        </>
+                                                    )}
+                                                    <span>
+                                                        {new Date(
+                                                            doc.created_at
+                                                        ).toLocaleDateString()}
+                                                    </span>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
 
                                     {/* Right: Active in Chat status & Delete button */}
                                     <div className="flex items-center gap-2.5 shrink-0">
-                                        {isChecked ? (
+                                        {isProcessing ? (
+                                            <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                                                <span>Processing...</span>
+                                            </span>
+                                        ) : isFailed ? (
+                                            <span className="text-[10px] sm:text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-500/15 text-red-600 dark:text-red-400 border border-red-500/30">
+                                                Failed
+                                            </span>
+                                        ) : isChecked ? (
                                             <span className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
                                                 <CheckIcon size={11} />
                                                 <span>Active in Chat</span>
