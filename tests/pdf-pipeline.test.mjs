@@ -5,13 +5,15 @@ import assert from "node:assert/strict"
 import {
     chunkText,
     getEmbeddings,
-    indexDocument,
     queryKnowledge,
     deleteDocumentVectors,
+    getDocumentR2Text,
+    getDocumentChunks,
+    retrieveDocumentContext,
 } from "../src/lib/rag.ts"
 import { extractPdfText, isPdfFile } from "../src/lib/pdf.ts"
 import { DocumentProgressDO } from "../src/lib/durable-object.ts"
-import { formatSSE, SSE_HEADERS } from "../src/lib/sse.ts"
+
 import { createR2PresignedPutUrl } from "../src/lib/r2-presign.ts"
 import { createDocument, getDocument, updateDocumentProgress, failDocument } from "../src/lib/db.ts"
 
@@ -449,4 +451,130 @@ test("PDF Processing Pipeline & Architecture Suite", async (t) => {
             assert.strictEqual(failed.status, "failed")
         }
     )
+
+    // -------------------------------------------------------------
+    // Test 12: getDocumentR2Text reads extracted document text with layered fallbacks
+    // -------------------------------------------------------------
+    await t.test("12. getDocumentR2Text reads extracted document text with layered fallbacks", async () => {
+        const r2Storage = new Map()
+        const mockR2 = {
+            async get(key) {
+                const val = r2Storage.get(key)
+                if (!val) return null
+                return {
+                    text: async () => val,
+                    arrayBuffer: async () => new TextEncoder().encode(val).buffer,
+                }
+            },
+            async put(key, val) {
+                r2Storage.set(key, typeof val === "string" ? val : "")
+            },
+            async list() {
+                return { objects: [] }
+            },
+        }
+
+        // Test fallback 1: extracted/{docId}.txt
+        r2Storage.set("extracted/doc_test_1.txt", "This is the primary extracted text for doc 1.")
+        const text1 = await getDocumentR2Text(mockR2, "doc_test_1", "doc1.pdf")
+        assert.strictEqual(text1, "This is the primary extracted text for doc 1.")
+
+        // Test fallback 2: intermediates/{docId}/chunks.json
+        r2Storage.set("intermediates/doc_test_2/chunks.json", JSON.stringify(["Chunk 1 content.", "Chunk 2 content."]))
+        const text2 = await getDocumentR2Text(mockR2, "doc_test_2", "doc2.pdf")
+        assert.ok(text2.includes("Chunk 1 content."))
+        assert.ok(text2.includes("Chunk 2 content."))
+    })
+
+    // -------------------------------------------------------------
+    // Test 13: getDocumentChunks scores and orders chunks by query keyword relevance
+    // -------------------------------------------------------------
+    await t.test("13. getDocumentChunks scores and orders chunks by query keyword relevance", async () => {
+        const r2Storage = new Map()
+        const chunks = [
+            "Introduction: This document outlines quarterly financial performance and enterprise cloud metrics.",
+            "Section 1: Operating expenses and infrastructure costs for data centers.",
+            "Section 2: Revenue breakdown by product lines including Cloudflare Workers and Vectorize.",
+            "Conclusion and future outlook for the upcoming fiscal quarter.",
+        ]
+        r2Storage.set("intermediates/finance_doc/chunks.json", JSON.stringify(chunks))
+
+        const mockR2 = {
+            async get(key) {
+                const val = r2Storage.get(key)
+                if (!val) return null
+                return {
+                    text: async () => val,
+                    arrayBuffer: async () => new TextEncoder().encode(val).buffer,
+                }
+            },
+            async put() {},
+            async list() {
+                return { objects: [] }
+            },
+        }
+
+        // Query for revenue
+        const result = await getDocumentChunks(mockR2, "finance_doc", "Financial Report.pdf", "What is the revenue breakdown?")
+        assert.ok(result.length > 0)
+        // Chunk containing "Revenue" should be included
+        const revenueChunk = result.find((c) => c.text.includes("Revenue breakdown"))
+        assert.ok(revenueChunk, "Expected chunk containing revenue breakdown to be retrieved")
+    })
+
+    // -------------------------------------------------------------
+    // Test 14: retrieveDocumentContext guarantees grounded context when Vectorize returns 0 matches
+    // -------------------------------------------------------------
+    await t.test("14. retrieveDocumentContext guarantees grounded context when Vectorize returns 0 matches", async () => {
+        const mockEmptyVectorize = {
+            async query() {
+                // Vectorize returns 0 matches (e.g. metadata filtering unindexed or query mismatch)
+                return { matches: [], count: 0 }
+            },
+        }
+        const mockAi = {
+            async run() {
+                return { data: [[0.1, 0.2, 0.3]] }
+            },
+        }
+
+        const r2Storage = new Map()
+        r2Storage.set(
+            "extracted/user_guide.txt",
+            "This user guide provides instructions on how to use the AI chat interface and select knowledge documents."
+        )
+
+        const mockR2 = {
+            async get(key) {
+                const val = r2Storage.get(key)
+                if (!val) return null
+                return {
+                    text: async () => val,
+                    arrayBuffer: async () => new TextEncoder().encode(val).buffer,
+                }
+            },
+            async put(key, val) {
+                r2Storage.set(key, typeof val === "string" ? val : "")
+            },
+            async list() {
+                return { objects: [] }
+            },
+        }
+
+        // Even though Vectorize returned 0 matches, retrieveDocumentContext MUST return grounded chunks from R2!
+        const chunks = await retrieveDocumentContext(
+            mockAi,
+            mockEmptyVectorize,
+            mockR2,
+            "summarize this document",
+            ["user_guide"],
+            { user_guide: "User Guide.pdf" }
+        )
+
+        assert.ok(chunks.length > 0, "Expected at least 1 grounded chunk to be retrieved")
+        assert.strictEqual(chunks[0].documentId, "user_guide")
+        assert.strictEqual(chunks[0].name, "User Guide.pdf")
+        assert.ok(chunks[0].text.includes("AI chat interface"))
+    })
 })
+

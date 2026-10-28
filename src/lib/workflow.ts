@@ -109,8 +109,12 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     )
                 }
 
-                // Save extracted text to R2 to prevent Workflow step state payload limit
+                // Save extracted text to R2 to prevent Workflow step state payload limit and provide permanent RAG fallback
                 await r2.put(extractedTextKey, text.trim(), {
+                    httpMetadata: { contentType: "text/plain; charset=utf-8" },
+                    customMetadata: { documentId, fileName },
+                })
+                await r2.put(`extracted/${documentId}.txt`, text.trim(), {
                     httpMetadata: { contentType: "text/plain; charset=utf-8" },
                     customMetadata: { documentId, fileName },
                 })
@@ -282,11 +286,12 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     this.env.DB
                 )
 
-                // Clean up intermediate files in R2 (best-effort)
+                // Clean up intermediate raw vectors file in R2 (best-effort);
+                // We intentionally preserve extractedTextKey and chunksKey for direct RAG prompt retrieval!
                 try {
                     const r2 = this.env.FILES
                     if (r2) {
-                        await r2.delete([extractedTextKey, chunksKey, vectorsKey])
+                        await r2.delete([vectorsKey])
                     }
                 } catch (cleanupErr) {
                     console.warn(
@@ -343,15 +348,11 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
             }
             await publishProgressEvent(this.env, failEvent)
 
-            // Clean up intermediate R2 files on terminal failure (best effort)
+            // Clean up temporary vectors on terminal failure (best effort)
             try {
                 const r2 = this.env.FILES
                 if (r2) {
-                    await r2.delete([
-                        `intermediates/${documentId}/extracted.txt`,
-                        `intermediates/${documentId}/chunks.json`,
-                        `intermediates/${documentId}/vectors.json`,
-                    ])
+                    await r2.delete([`intermediates/${documentId}/vectors.json`])
                 }
             } catch {}
 
@@ -360,3 +361,4 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
         }
     }
 }
+

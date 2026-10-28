@@ -64,6 +64,8 @@ export function ChatContainer() {
     // Per-chat selected knowledge base documents (by default, 0 documents selected for any chat)
     const [selectedDocIdsByChat, setSelectedDocIdsByChat] = useState<Record<string, string[]>>({})
     const [allKnowledgeDocs, setAllKnowledgeDocs] = useState<DocumentItem[]>([])
+    const allKnowledgeDocsRef = useRef<DocumentItem[]>([])
+    allKnowledgeDocsRef.current = allKnowledgeDocs
 
     const [isStreaming, setIsStreaming] = useState(false)
     const [streamingContent, setStreamingContent] = useState("")
@@ -191,7 +193,27 @@ export function ChatContainer() {
 
         const savedEffort = localStorage.getItem("cf_ai_effort") as EffortLevel | null
         if (savedEffort) setEffort(savedEffort)
+
+        try {
+            const savedSelectedDocs = localStorage.getItem("cf_ai_selected_docs_by_chat")
+            if (savedSelectedDocs) {
+                const parsed = JSON.parse(savedSelectedDocs)
+                if (parsed && typeof parsed === "object") {
+                    setSelectedDocIdsByChat(parsed)
+                }
+            }
+        } catch {}
     }, [])
+
+    // Persist selected document associations across chats
+    useEffect(() => {
+        try {
+            localStorage.setItem(
+                "cf_ai_selected_docs_by_chat",
+                JSON.stringify(selectedDocIdsByChat)
+            )
+        } catch {}
+    }, [selectedDocIdsByChat])
 
     const toggleTheme = () => {
         const newTheme = theme === "light" ? "dark" : "light"
@@ -350,6 +372,17 @@ export function ChatContainer() {
                     if (data.model) {
                         setSelectedModel(data.model)
                     }
+                    // Auto-restore selected docs for this conversation if not yet set
+                    setSelectedDocIdsByChat((prev) => {
+                        if (prev[id] && prev[id].length > 0) return prev
+                        const convDocs = allKnowledgeDocsRef.current
+                            .filter((d) => d.conversation_id === id && d.status === "ready")
+                            .map((d) => d.id)
+                        if (convDocs.length > 0) {
+                            return { ...prev, [id]: convDocs }
+                        }
+                        return prev
+                    })
                     if (updateUrl) {
                         updateUrlConversationId(id, replaceUrl)
                     }
@@ -652,14 +685,13 @@ export function ChatContainer() {
                                 return prev
                             })
                             setSelectedDocIdsByChat((prev) => {
-                                if (
-                                    prev["new_chat"] &&
-                                    prev["new_chat"].length > 0 &&
-                                    !prev[event.conversationId]
-                                ) {
+                                const newChatDocs = prev["new_chat"] || []
+                                if (newChatDocs.length > 0) {
+                                    const existing = prev[event.conversationId] || []
+                                    const merged = Array.from(new Set([...existing, ...newChatDocs]))
                                     return {
                                         ...prev,
-                                        [event.conversationId]: prev["new_chat"],
+                                        [event.conversationId]: merged,
                                     }
                                 }
                                 return prev
@@ -741,16 +773,15 @@ export function ChatContainer() {
             // Update knowledge base catalog in state
             setAllKnowledgeDocs((prev) => [doc, ...prev.filter((d) => d.id !== doc.id)])
 
-            // If a specific conversation was targeted, associate the document with it
-            if (targetChatId) {
-                setSelectedDocIdsByChat((prev) => {
-                    const current = prev[targetChatId] || []
-                    return {
-                        ...prev,
-                        [targetChatId]: current.includes(doc.id) ? current : [...current, doc.id],
-                    }
-                })
-            }
+            // Associate the ready document with the target chat (or active chat / new_chat)
+            const chatKey = targetChatId || activeConversationIdRef.current || "new_chat"
+            setSelectedDocIdsByChat((prev) => {
+                const current = prev[chatKey] || []
+                return {
+                    ...prev,
+                    [chatKey]: current.includes(doc.id) ? current : [...current, doc.id],
+                }
+            })
         },
         []
     )

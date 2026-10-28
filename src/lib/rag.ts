@@ -1,7 +1,9 @@
 import { env } from "cloudflare:workers"
 import { EMBEDDING_MODEL_ID } from "./models"
+import { extractPdfText } from "./pdf"
 import type {
     AppEnv,
+    R2BucketBinding,
     VectorizeIndexBinding,
     VectorizeMatch,
     VectorizeQueryResult,
@@ -193,7 +195,7 @@ export async function queryKnowledge(
 
     if (!searchResult) {
         searchResult = await vectorize.query(queryVector, {
-            topK: selectedDocIds && selectedDocIds.length > 0 ? Math.max(topK, 30) : topK,
+            topK: selectedDocIds && selectedDocIds.length > 0 ? Math.max(topK, 50) : topK,
             returnMetadata: "all",
         })
     }
@@ -202,22 +204,313 @@ export async function queryKnowledge(
         return []
     }
 
-    const results: RetrievedChunk[] = searchResult.matches.map((m: VectorizeMatch) => ({
-        score: m.score,
-        documentId: String(m.metadata?.documentId || ""),
-        conversationId: String(m.metadata?.conversationId || ""),
-        name: String(m.metadata?.name || "Document"),
-        chunkIndex: Number(m.metadata?.chunkIndex || 0),
-        text: String(m.metadata?.text || ""),
-    }))
+    const results: RetrievedChunk[] = searchResult.matches.map((m: VectorizeMatch) => {
+        const idDocId = m.id.includes("_") ? m.id.substring(0, m.id.lastIndexOf("_")) : m.id
+        const docId = String(m.metadata?.documentId || idDocId || "")
+        return {
+            score: m.score,
+            documentId: docId,
+            conversationId: String(m.metadata?.conversationId || ""),
+            name: String(m.metadata?.name || "Document"),
+            chunkIndex: Number(m.metadata?.chunkIndex || 0),
+            text: String(m.metadata?.text || ""),
+        }
+    })
 
     if (selectedDocIds && selectedDocIds.length > 0) {
         return results.filter(
-            (r: RetrievedChunk) => r.documentId && selectedDocIds.includes(r.documentId)
+            (r: RetrievedChunk) =>
+                r.documentId &&
+                (selectedDocIds.includes(r.documentId) ||
+                    selectedDocIds.some((id) => r.documentId.startsWith(id)))
         )
     }
 
     return results
+}
+
+/**
+ * Retrieve the plain text of a document from R2 storage with layered fallbacks:
+ * 1. extracted/${docId}.txt or intermediates/${docId}/extracted.txt
+ * 2. intermediates/${docId}/chunks.json
+ * 3. On-demand PDF / text extraction from raw R2 object
+ */
+export async function getDocumentR2Text(
+    r2: R2BucketBinding,
+    docId: string,
+    docName?: string,
+    ai?: unknown
+): Promise<string> {
+    if (!r2) return ""
+
+    // 1. Check extracted text file
+    try {
+        const extractedObj =
+            (await r2.get(`extracted/${docId}.txt`)) ||
+            (await r2.get(`intermediates/${docId}/extracted.txt`))
+        if (extractedObj) {
+            const text = extractedObj.text
+                ? await extractedObj.text()
+                : new TextDecoder().decode(await extractedObj.arrayBuffer())
+            if (text.trim()) return text.trim()
+        }
+    } catch {}
+
+    // 2. Check chunks.json
+    try {
+        const chunksObj = await r2.get(`intermediates/${docId}/chunks.json`)
+        if (chunksObj) {
+            const raw = chunksObj.text
+                ? await chunksObj.text()
+                : new TextDecoder().decode(await chunksObj.arrayBuffer())
+            const chunks = JSON.parse(raw) as string[]
+            if (Array.isArray(chunks) && chunks.length > 0) {
+                return chunks.join("\n\n")
+            }
+        }
+    } catch {}
+
+    // 3. Fallback: read original file from R2 and extract on the fly
+    try {
+        let rawObj = await r2.get(`uploads/${docId}.pdf`)
+        let isPdf = true
+        if (!rawObj) {
+            const list = await r2.list({ prefix: `uploads/${docId}`, limit: 5 })
+            if (list.objects.length > 0) {
+                const targetKey = list.objects[0].key
+                rawObj = await r2.get(targetKey)
+                isPdf =
+                    targetKey.toLowerCase().endsWith(".pdf") ||
+                    (docName?.toLowerCase().endsWith(".pdf") ?? false)
+            }
+        }
+
+        if (rawObj) {
+            if (isPdf) {
+                const buf = await rawObj.arrayBuffer()
+                const extracted = await extractPdfText(buf, ai)
+                if (extracted.trim()) {
+                    // Cache the extracted text for next time
+                    r2.put(`extracted/${docId}.txt`, extracted.trim(), {
+                        httpMetadata: { contentType: "text/plain; charset=utf-8" },
+                    }).catch(() => {})
+                    return extracted.trim()
+                }
+            } else {
+                const text = rawObj.text
+                    ? await rawObj.text()
+                    : new TextDecoder().decode(await rawObj.arrayBuffer())
+                if (text.trim()) return text.trim()
+            }
+        }
+    } catch (err) {
+        console.warn(`Could not extract fallback text for document ${docId}:`, err)
+    }
+
+    return ""
+}
+
+/**
+ * Load document chunks from R2, intelligently scoring them if a query is provided.
+ */
+export async function getDocumentChunks(
+    r2: R2BucketBinding,
+    docId: string,
+    docName: string,
+    query?: string,
+    ai?: unknown
+): Promise<RetrievedChunk[]> {
+    if (!r2) return []
+
+    let chunks: string[] = []
+
+    // 1. Try reading pre-computed chunks
+    try {
+        const chunksObj = await r2.get(`intermediates/${docId}/chunks.json`)
+        if (chunksObj) {
+            const raw = chunksObj.text
+                ? await chunksObj.text()
+                : new TextDecoder().decode(await chunksObj.arrayBuffer())
+            const parsed = JSON.parse(raw) as string[]
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                chunks = parsed
+            }
+        }
+    } catch {}
+
+    // 2. If no chunks file, get document text and chunk it
+    if (chunks.length === 0) {
+        const text = await getDocumentR2Text(r2, docId, docName, ai)
+        if (text) {
+            chunks = chunkText(text)
+            if (chunks.length > 0) {
+                // Asynchronously save chunks to R2 so subsequent queries are fast
+                r2.put(`intermediates/${docId}/chunks.json`, JSON.stringify(chunks), {
+                    httpMetadata: { contentType: "application/json" },
+                    customMetadata: { documentId: docId },
+                }).catch(() => {})
+            }
+        }
+    }
+
+    if (chunks.length === 0) return []
+
+    // If query words are present, score chunks by keyword relevance
+    const queryTerms = query
+        ? query
+              .toLowerCase()
+              .replace(/[^a-z0-9\s]/g, " ")
+              .split(/\s+/)
+              .filter(
+                  (t) =>
+                      t.length >= 3 &&
+                      ![
+                          "what",
+                          "when",
+                          "where",
+                          "which",
+                          "who",
+                          "whom",
+                          "whose",
+                          "why",
+                          "how",
+                          "this",
+                          "that",
+                          "these",
+                          "those",
+                          "about",
+                          "document",
+                          "file",
+                          "pdf",
+                          "tell",
+                          "explain",
+                          "summarize",
+                          "give",
+                      ].includes(t)
+              )
+        : []
+
+    interface ScoredIndex {
+        index: number
+        score: number
+        chunk: string
+    }
+
+    const scored: ScoredIndex[] = chunks.map((chunk, index) => {
+        const lowerChunk = chunk.toLowerCase()
+        let matchCount = 0
+        for (const term of queryTerms) {
+            if (lowerChunk.includes(term)) {
+                matchCount += 1
+            }
+        }
+
+        // Bias index 0 (title/intro/summary of document)
+        let score = matchCount
+        if (index === 0) score += 2
+        else if (index === 1) score += 1
+
+        return { index, score, chunk }
+    })
+
+    scored.sort((a, b) => b.score - a.score)
+
+    // Take top 4 chunks
+    const topScored = scored.slice(0, 4)
+    // Sort selected chunks back into reading order (chunkIndex ascending)
+    topScored.sort((a, b) => a.index - b.index)
+
+    return topScored.map((item) => ({
+        score: item.score,
+        documentId: docId,
+        name: docName,
+        chunkIndex: item.index,
+        text: item.chunk,
+    }))
+}
+
+/**
+ * Unified RAG retrieval: Combines Vectorize similarity search with direct R2 document chunk loading
+ * to guarantee that selected document(s) always provide rich, grounded context to the model.
+ */
+export async function retrieveDocumentContext(
+    ai: WorkersAi | undefined,
+    vectorize: VectorizeIndexBinding | undefined,
+    r2: R2BucketBinding | undefined,
+    query: string,
+    selectedDocIds: string[],
+    docNamesById: Record<string, string> = {}
+): Promise<RetrievedChunk[]> {
+    if (!selectedDocIds || selectedDocIds.length === 0) {
+        return []
+    }
+
+    const chunksByDocId = new Map<string, RetrievedChunk[]>()
+    for (const id of selectedDocIds) {
+        chunksByDocId.set(id, [])
+    }
+
+    // 1. Try Vectorize semantic query if bindings are available
+    if (ai && vectorize) {
+        try {
+            const rawVectorChunks = await queryKnowledge(
+                ai,
+                vectorize,
+                query,
+                20,
+                selectedDocIds
+            )
+
+            for (const chunk of rawVectorChunks) {
+                if (chunk.documentId && chunksByDocId.has(chunk.documentId)) {
+                    const list = chunksByDocId.get(chunk.documentId)!
+                    // Check if chunk text or index already included
+                    if (
+                        !list.some(
+                            (c) => c.chunkIndex === chunk.chunkIndex || c.text === chunk.text
+                        )
+                    ) {
+                        list.push(chunk)
+                    }
+                }
+            }
+        } catch (vecErr) {
+            console.warn("Vectorize search in retrieveDocumentContext failed:", vecErr)
+        }
+    }
+
+    // 2. For any selected document with fewer than 2 retrieved chunks, load directly from R2
+    if (r2) {
+        for (const docId of selectedDocIds) {
+            const existing = chunksByDocId.get(docId) || []
+            if (existing.length < 2) {
+                try {
+                    const docName = docNamesById[docId] || "Document"
+                    const r2Chunks = await getDocumentChunks(r2, docId, docName, query, ai)
+                    for (const r2c of r2Chunks) {
+                        if (
+                            !existing.some(
+                                (c) => c.chunkIndex === r2c.chunkIndex || c.text === r2c.text
+                            )
+                        ) {
+                            existing.push(r2c)
+                        }
+                    }
+                    chunksByDocId.set(docId, existing)
+                } catch (r2Err) {
+                    console.warn(`Direct R2 chunk load failed for ${docId}:`, r2Err)
+                }
+            }
+        }
+    }
+
+    // Flatten and limit to max 8 chunks across all selected documents
+    const allChunks: RetrievedChunk[] = []
+    for (const [_, list] of chunksByDocId.entries()) {
+        allChunks.push(...list.slice(0, 4))
+    }
+
+    return allChunks.slice(0, 8)
 }
 
 /**
@@ -243,3 +536,4 @@ export async function deleteDocumentVectors(
         // Vector deletion is best-effort and asynchronous in Vectorize
     }
 }
+

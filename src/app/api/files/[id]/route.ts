@@ -100,7 +100,14 @@ export async function DELETE(req: Request, context: { params: Promise<{ id: stri
         try {
             const r2 = getR2()
             const r2Key = doc?.r2_key || `uploads/${id}`
-            await r2.delete(r2Key)
+            await r2.delete([
+                r2Key,
+                `uploads/${id}`,
+                `extracted/${id}.txt`,
+                `intermediates/${id}/extracted.txt`,
+                `intermediates/${id}/chunks.json`,
+                `intermediates/${id}/vectors.json`,
+            ])
         } catch (r2Err) {
             console.warn("Could not delete from R2:", r2Err)
         }

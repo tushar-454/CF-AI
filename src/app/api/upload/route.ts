@@ -2,7 +2,7 @@ import { getR2 } from "@/lib/ai"
 import { verifyPin } from "@/lib/auth"
 import { createDocument, failDocument } from "@/lib/db"
 import { isPdfFile } from "@/lib/pdf"
-import { indexDocument } from "@/lib/rag"
+import { chunkText, indexDocument } from "@/lib/rag"
 import { AppEnv } from "@/lib/types"
 import { env } from "cloudflare:workers"
 
@@ -210,6 +210,29 @@ export async function POST(req: Request) {
                 extractedText = await file.text()
             } catch (decodeErr) {
                 console.warn("Failed to decode text file:", decodeErr)
+            }
+        }
+
+        // Save extracted text & pre-computed chunks to R2 for resilient RAG retrieval
+        if (extractedText.trim()) {
+            try {
+                await r2.put(`extracted/${documentId}.txt`, extractedText.trim(), {
+                    httpMetadata: { contentType: "text/plain; charset=utf-8" },
+                    customMetadata: { documentId, fileName: file.name },
+                })
+                await r2.put(`intermediates/${documentId}/extracted.txt`, extractedText.trim(), {
+                    httpMetadata: { contentType: "text/plain; charset=utf-8" },
+                    customMetadata: { documentId, fileName: file.name },
+                })
+                const chunks = chunkText(extractedText)
+                if (chunks.length > 0) {
+                    await r2.put(`intermediates/${documentId}/chunks.json`, JSON.stringify(chunks), {
+                        httpMetadata: { contentType: "application/json" },
+                        customMetadata: { documentId, chunkCount: String(chunks.length) },
+                    })
+                }
+            } catch (r2Err) {
+                console.warn("Failed to store text document chunks in R2:", r2Err)
             }
         }
 

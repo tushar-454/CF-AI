@@ -40,6 +40,7 @@ export function KnowledgeBaseModal({
     onSelectAllDocs,
     onClearSelectedDocs,
     onDocumentsLoaded,
+    onDocumentProcessedAndReady,
     activeConversationId,
 }: KnowledgeBaseModalProps) {
     const [documents, setDocuments] = useState<DocumentItem[]>([])
@@ -50,6 +51,15 @@ export function KnowledgeBaseModal({
     const fileInputRef = useRef<HTMLInputElement>(null)
     const selectAllRef = useRef<HTMLInputElement>(null)
     const subscriptionsRef = useRef<Map<string, () => void>>(new Map())
+
+    const documentsRef = useRef(documents)
+    documentsRef.current = documents
+    const onToggleSelectDocRef = useRef(onToggleSelectDoc)
+    onToggleSelectDocRef.current = onToggleSelectDoc
+    const onDocReadyRef = useRef(onDocumentProcessedAndReady)
+    onDocReadyRef.current = onDocumentProcessedAndReady
+    const activeConversationIdRef = useRef(activeConversationId)
+    activeConversationIdRef.current = activeConversationId
 
     const loadDocuments = useCallback(async () => {
         setIsLoading(true)
@@ -113,6 +123,21 @@ export function KnowledgeBaseModal({
                     )
 
                     onNotification?.(`"${docName}" indexed successfully into Knowledge Base.`)
+
+                    // Auto-select ready document for current chat so user can query it immediately
+                    onToggleSelectDocRef.current(evt.documentId)
+                    const updatedDoc = documentsRef.current.find((d) => d.id === evt.documentId)
+                    if (updatedDoc) {
+                        onDocReadyRef.current?.(
+                            {
+                                ...updatedDoc,
+                                status: "ready",
+                                stage: "ready",
+                                progress: 100,
+                            },
+                            activeConversationIdRef.current
+                        )
+                    }
 
                     const unsub = subscriptionsRef.current.get(docId)
                     unsub?.()

@@ -8,7 +8,7 @@ import {
     getMessages,
 } from "@/lib/db"
 import { DEFAULT_MODEL_ID } from "@/lib/models"
-import { queryKnowledge } from "@/lib/rag"
+import { getDocumentR2Text, queryKnowledge, retrieveDocumentContext } from "@/lib/rag"
 import { createSSEStream, SSE_HEADERS } from "@/lib/sse"
 import { AppEnv } from "@/lib/types"
 import { env } from "cloudflare:workers"
@@ -121,107 +121,109 @@ export async function POST(req: Request) {
             }
         }
 
-        // Add current user message
-        let finalUserContent = message
+        const appEnv = env as unknown as AppEnv
+        const ai = appEnv.AI
+        const vectorize = appEnv.VECTORIZE
+        const r2 = appEnv.FILES
+
         // If files are attached to the message, inject their text whenever contextMode !== "none"
+        const attachedContexts: string[] = []
         if (contextMode !== "none" && attachments.length > 0) {
-            const fileContexts = attachments
-                .filter((a) => a.textContent && a.textContent.trim())
-                .map((a) => `[Attached File: ${a.name}]\n${a.textContent}`)
-                .join("\n\n")
-            if (fileContexts) {
-                finalUserContent += `\n\n--- Attached Files Content ---\n${fileContexts}`
+            for (const a of attachments) {
+                let content = a.textContent?.trim() || ""
+                if (!content && r2) {
+                    try {
+                        content = await getDocumentR2Text(r2, a.id, a.name, ai)
+                    } catch {}
+                }
+                if (content) {
+                    attachedContexts.push(
+                        `[Attached File: ${a.name}]\n${content.slice(0, 16000)}`
+                    )
+                }
             }
         }
 
-        chatMessages.push({
-            role: "user",
-            content: finalUserContent,
-        })
-
         // Handle Knowledge base RAG context:
-        // STRICT RULE: Only query Vectorize and inject knowledge base context if the user has
-        // explicitly checked/selected specific document(s) for this chat conversation.
-        // If no documents are selected (the default), DO NOT inject any vector or knowledge context.
+        // When documents are selected (or contextMode === 'knowledge'), retrieve ground-truth chunks
         let ragSystemPrompt = ""
+        let contextChunks: Array<{ documentId: string; name: string; text: string }> = []
+        const docNamesById: Record<string, string> = {}
+        const pendingDocs: string[] = []
+
         const hasSelectedDocs =
             contextMode !== "none" &&
             Array.isArray(selectedDocumentIds) &&
             selectedDocumentIds.length > 0
 
         if (hasSelectedDocs) {
-            try {
-                const appEnv = env as unknown as AppEnv
-                const ai = appEnv.AI
-                const vectorize = appEnv.VECTORIZE
-                let contextChunks: Array<{ documentId: string; name: string; text: string }> = []
-
-                if (ai && vectorize) {
-                    const rawChunks = await queryKnowledge(
-                        ai,
-                        vectorize,
-                        message,
-                        15,
-                        selectedDocumentIds
-                    )
-                    rawChunks.sort((a, b) => b.score - a.score)
-
-                    contextChunks = rawChunks.slice(0, 6).map((c) => ({
-                        documentId: c.documentId,
-                        name: c.name,
-                        text: c.text,
-                    }))
-                }
-
-                // If no chunks were retrieved and some selected documents are still indexing,
-                // inform the assistant gracefully without performing synchronous PDF parsing in the chat route
-                if (contextChunks.length === 0) {
-                    const pendingDocs: string[] = []
-                    for (const docId of selectedDocumentIds) {
-                        const doc = await getDocument(docId).catch(() => null)
-                        if (doc && (doc.status === "queued" || doc.status === "processing")) {
+            // Fetch document metadata from D1
+            for (const docId of selectedDocumentIds) {
+                try {
+                    const doc = await getDocument(docId)
+                    if (doc) {
+                        docNamesById[docId] = doc.name
+                        if (doc.status === "queued" || doc.status === "processing") {
                             pendingDocs.push(doc.name)
                         }
                     }
-                    if (pendingDocs.length > 0) {
-                        ragSystemPrompt = `You are a helpful AI assistant. Note: The user has selected documents that are currently still being processed and indexed in the background: ${pendingDocs.join(", ")}. If the user asks about content from those documents, let them know that indexing is completing in the background.`
-                    }
-                }
+                } catch {}
+            }
 
-                if (contextChunks.length > 0) {
-                    const contextText = contextChunks
-                        .map((c, i) => `[Selected Document ${i + 1}: ${c.name}]\n${c.text}`)
-                        .join("\n\n")
-                    ragSystemPrompt = `You are a helpful, intelligent AI chat assistant. You have access to reference materials from the user's explicitly selected knowledge base document(s):
+            try {
+                contextChunks = await retrieveDocumentContext(
+                    ai,
+                    vectorize,
+                    r2,
+                    message,
+                    selectedDocumentIds,
+                    docNamesById
+                )
+            } catch (ragErr) {
+                console.warn("retrieveDocumentContext error:", ragErr)
+            }
+        } else if (contextMode === "knowledge" && ai && vectorize) {
+            // General knowledge mode with no explicit document selected: query global Vectorize index
+            try {
+                const globalChunks = await queryKnowledge(ai, vectorize, message, 6)
+                contextChunks = globalChunks.map((c) => ({
+                    documentId: c.documentId,
+                    name: c.name,
+                    text: c.text,
+                }))
+            } catch (vecErr) {
+                console.warn("Global knowledge query failed:", vecErr)
+            }
+        }
+
+        if (contextChunks.length > 0) {
+            const docNamesList = Array.from(new Set(contextChunks.map((c) => c.name))).join(", ")
+            const contextText = contextChunks
+                .map(
+                    (c, i) =>
+                        `[Selected Document ${i + 1}: ${c.name}]\n${c.text}`
+                )
+                .join("\n\n")
+
+            ragSystemPrompt = `You are a helpful, intelligent AI chat assistant. You have access to reference materials from the user's selected knowledge base document(s): ${docNamesList}
 
 --- SELECTED KNOWLEDGE BASE REFERENCE MATERIALS ---
 ${contextText}
 --- END OF REFERENCE MATERIALS ---
 
 CORE INSTRUCTIONS & PRIORITY HIERARCHY:
-1. AI CHAT ASSISTANT BEHAVIOR:
-   - Act as a friendly, natural, and helpful AI chat assistant at all times.
-   - For simple greetings (such as "hi", "hello", "hey"), pleasantries, or casual small talk, respond warmly, naturally, and concisely (e.g. "Hello! How can I help you today?").
-   - DO NOT overthink or refuse greetings, and do not say "I can only answer from the document".
-   - If the user asks general everyday questions unrelated to the selected documents, answer helpfully using your general knowledge.
-
-2. HIGHEST PRIORITY FOR KNOWLEDGE BASE (CRUCIAL & STRICT):
-   - Whenever the user's question, prompt, or discussion context matches, inquires about, or relates to the selected knowledge base document(s) (including topics, details, facts, numbers, policies, procedures, summaries, or questions about what the document contains):
+1. HIGHEST PRIORITY FOR KNOWLEDGE BASE (CRUCIAL & STRICT):
+   - Whenever the user's question, prompt, or discussion context inquires about, or relates to the selected document(s) (including topics, details, facts, numbers, policies, procedures, summaries, or questions about what the document contains):
      * The selected knowledge base reference materials MUST BE GIVEN TOP PRIORITY over everything else.
-     * This knowledge base is CRUCIAL and MUST BE STRICTLY FOLLOWED.
-     * Ground your answers directly, accurately, and faithfully in the reference materials provided above.
-     * Do not contradict or override the document details with external assumptions.
-     * If the user requests the summary, full text, or specific details from a selected document, provide them accurately and thoroughly from these reference materials.`
-                } else {
-                    ragSystemPrompt = `You are a helpful, intelligent AI chat assistant. The user has selected knowledge base documents for this chat.
-- Act as a normal, natural, and helpful AI chat assistant.
-- For simple greetings (such as "hi", "hello"), respond warmly and concisely without overthinking.
-- If the user asks about the selected documents, acknowledge them and provide whatever assistance you can.`
-                }
-            } catch (err: unknown) {
-                const msg = err instanceof Error ? err.message : String(err)
-                console.warn("RAG query failed or Vectorize not configured:", msg)
-            }
+     * Ground your answers directly, accurately, thoroughly, and faithfully in the reference materials provided above.
+     * If the user requests a summary, explanation, key takeaways, or specific details, provide them directly and accurately from these reference materials.
+     * Do not claim you cannot view or access the document, because its contents are provided in the reference materials above.
+
+2. CHAT ASSISTANT BEHAVIOR:
+   - For simple greetings (such as "hi", "hello", "hey"), pleasantries, or casual small talk, respond warmly, naturally, and concisely (e.g. "Hello! I'm ready to help you with ${docNamesList}. What would you like to know?").
+   - If the user asks general everyday questions unrelated to the selected documents, answer helpfully using your general knowledge.`
+        } else if (pendingDocs.length > 0) {
+            ragSystemPrompt = `You are a helpful AI assistant. Note: The user has selected documents that are currently still being processed and indexed in the background: ${pendingDocs.join(", ")}. If the user asks about content from those documents, let them know that indexing is completing in the background shortly.`
         } else {
             // No knowledge base document selected: Act purely as a normal AI chat box with Cloudflare AI model
             ragSystemPrompt = `You are a helpful, versatile, and conversational AI chat assistant powered by Cloudflare Workers AI.
@@ -232,6 +234,23 @@ CHAT GUIDELINES:
 - DO NOT overthink or output unnecessary, lengthy, unsolicited lectures, essays, or repetitive filler for simple greetings or casual queries.
 - When the user asks specific, analytical, coding, or complex questions, provide clear, accurate, and well-structured answers tailored directly to what they requested.`
         }
+
+        // Add current user message with prompt augmentation
+        let finalUserContent = message
+        if (attachedContexts.length > 0) {
+            finalUserContent = `--- Attached Files Content ---\n${attachedContexts.join("\n\n")}\n\n${finalUserContent}`
+        }
+        if (contextChunks.length > 0) {
+            const contextSummary = contextChunks
+                .map((c, i) => `[Reference ${i + 1} (${c.name})]:\n${c.text}`)
+                .join("\n\n")
+            finalUserContent = `[Reference Material from Selected Document(s)]:\n${contextSummary}\n\n[User Question]:\n${finalUserContent}`
+        }
+
+        chatMessages.push({
+            role: "user",
+            content: finalUserContent,
+        })
 
         // Create SSE response stream
         const { readable, send, close } = createSSEStream()
