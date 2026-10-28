@@ -137,9 +137,7 @@ export async function POST(req: Request) {
                     } catch {}
                 }
                 if (content) {
-                    attachedContexts.push(
-                        `[Attached File: ${a.name}]\n${content.slice(0, 16000)}`
-                    )
+                    attachedContexts.push(`[Attached File: ${a.name}]\n${content.slice(0, 16000)}`)
                 }
             }
         }
@@ -147,7 +145,12 @@ export async function POST(req: Request) {
         // Handle Knowledge base RAG context:
         // When documents are selected (or contextMode === 'knowledge'), retrieve ground-truth chunks
         let ragSystemPrompt = ""
-        let contextChunks: Array<{ documentId: string; name: string; text: string }> = []
+        let contextChunks: Array<{
+            documentId: string
+            name: string
+            text: string
+            pageNumber?: number
+        }> = []
         const docNamesById: Record<string, string> = {}
         const pendingDocs: string[] = []
 
@@ -190,6 +193,7 @@ export async function POST(req: Request) {
                     documentId: c.documentId,
                     name: c.name,
                     text: c.text,
+                    pageNumber: c.pageNumber,
                 }))
             } catch (vecErr) {
                 console.warn("Global knowledge query failed:", vecErr)
@@ -201,7 +205,7 @@ export async function POST(req: Request) {
             const contextText = contextChunks
                 .map(
                     (c, i) =>
-                        `[Selected Document ${i + 1}: ${c.name}]\n${c.text}`
+                        `[Selected Document ${i + 1}: ${c.name}${c.pageNumber ? ` (Page ${c.pageNumber})` : ""}]\n${c.text}`
                 )
                 .join("\n\n")
 
@@ -219,7 +223,14 @@ CORE INSTRUCTIONS & PRIORITY HIERARCHY:
      * If the user requests a summary, explanation, key takeaways, or specific details, provide them directly and accurately from these reference materials.
      * Do not claim you cannot view or access the document, because its contents are provided in the reference materials above.
 
-2. CHAT ASSISTANT BEHAVIOR:
+2. MANDATORY PDF PAGE CITATION BADGE (CRUCIAL & REQUIRED):
+   - Each excerpt in the reference materials specifies its originating page number.
+   - When answering based on reference materials, you MUST conclude your response with a citation badge indicating the exact page number(s) where the facts were found.
+   - Format: Place it at the very bottom of your response on its own clean line:
+     📄 Page X (or 📄 Pages X, Y if multiple pages, e.g. 📄 Page 3 or 📄 Pages 2, 4)
+   - Only cite actual page numbers present in the reference materials above.
+
+3. CHAT ASSISTANT BEHAVIOR:
    - For simple greetings (such as "hi", "hello", "hey"), pleasantries, or casual small talk, respond warmly, naturally, and concisely (e.g. "Hello! I'm ready to help you with ${docNamesList}. What would you like to know?").
    - If the user asks general everyday questions unrelated to the selected documents, answer helpfully using your general knowledge.`
         } else if (pendingDocs.length > 0) {
@@ -242,7 +253,10 @@ CHAT GUIDELINES:
         }
         if (contextChunks.length > 0) {
             const contextSummary = contextChunks
-                .map((c, i) => `[Reference ${i + 1} (${c.name})]:\n${c.text}`)
+                .map(
+                    (c, i) =>
+                        `[Reference ${i + 1} (${c.name}${c.pageNumber ? ` - Page ${c.pageNumber}` : ""})]:\n${c.text}`
+                )
                 .join("\n\n")
             finalUserContent = `[Reference Material from Selected Document(s)]:\n${contextSummary}\n\n[User Question]:\n${finalUserContent}`
         }
@@ -284,6 +298,29 @@ CHAT GUIDELINES:
                     if (chunk.delta) {
                         fullAssistantContent += chunk.delta
                         await send({ delta: chunk.delta })
+                    }
+                }
+
+                // If user consulted selected documents and we have ground-truth pages, ensure the badge is present
+                const relevantPages = Array.from(
+                    new Set(
+                        contextChunks
+                            .map((c) => c.pageNumber)
+                            .filter((p): p is number => typeof p === "number" && p > 0)
+                    )
+                ).sort((a, b) => a - b)
+
+                if (hasSelectedDocs && relevantPages.length > 0) {
+                    const hasPageCitation = /(?:📄|\bpages?\b|\bsource\b)\s*:?\s*\d+/i.test(
+                        fullAssistantContent
+                    )
+                    if (!hasPageCitation) {
+                        const badgeText =
+                            relevantPages.length === 1
+                                ? `\n\n📄 Page ${relevantPages[0]}`
+                                : `\n\n📄 Pages ${relevantPages.join(", ")}`
+                        fullAssistantContent += badgeText
+                        await send({ delta: badgeText })
                     }
                 }
 

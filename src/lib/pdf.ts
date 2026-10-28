@@ -11,31 +11,47 @@ export function isPdfFile(mime: string, filename: string): boolean {
     return ext === "pdf"
 }
 
+export interface PdfPageContent {
+    pageNumber: number // 1-indexed (1, 2, 3...)
+    text: string
+}
+
 /**
- * Extract selectable plain text from a PDF document buffer.
- * Powered by unpdf (serverless / edge-optimized PDF.js build with zero DOM/canvas dependencies).
+ * Extract selectable plain text by page from a PDF document buffer.
+ * Returns an array of pages with 1-indexed pageNumber and cleaned text.
  */
-export async function extractPdfText(
+export async function extractPdfPages(
     pdfBuffer: ArrayBuffer | Uint8Array,
     aiBinding?: unknown
-): Promise<string> {
+): Promise<PdfPageContent[]> {
     const uint8 = pdfBuffer instanceof Uint8Array ? pdfBuffer : new Uint8Array(pdfBuffer)
     if (uint8.byteLength === 0) {
-        return ""
+        return []
     }
 
-    // Attempt 1: unpdf extraction
+    // Attempt 1: unpdf extraction with mergePages: false to preserve page numbers
     try {
         const pdf = await getDocumentProxy(uint8)
-        const { text } = await extractText(pdf, { mergePages: true })
-        if (typeof text === "string" && text.trim().length > 0) {
-            // Clean up redundant blank lines or null characters
-            return text
-                .split("\0")
-                .join("")
-                .replace(/\r\n/g, "\n")
-                .replace(/\n{3,}/g, "\n\n")
-                .trim()
+        const { text } = await extractText(pdf, { mergePages: false })
+        if (Array.isArray(text) && text.length > 0) {
+            const pages: PdfPageContent[] = []
+            for (let i = 0; i < text.length; i++) {
+                const cleaned = (text[i] || "")
+                    .split("\0")
+                    .join("")
+                    .replace(/\r\n/g, "\n")
+                    .replace(/\n{3,}/g, "\n\n")
+                    .trim()
+                if (cleaned.length > 0) {
+                    pages.push({
+                        pageNumber: i + 1,
+                        text: cleaned,
+                    })
+                }
+            }
+            if (pages.length > 0) {
+                return pages
+            }
         }
     } catch (unpdfErr) {
         console.warn("unpdf text extraction error:", unpdfErr)
@@ -57,12 +73,24 @@ export async function extractPdfText(
             })
             const parsed = res?.content || res?.text || ""
             if (parsed.trim().length > 0) {
-                return parsed.trim()
+                return [{ pageNumber: 1, text: parsed.trim() }]
             }
         } catch (aiErr) {
             console.warn("Workers AI toMarkdown fallback error:", aiErr)
         }
     }
 
-    return ""
+    return []
+}
+
+/**
+ * Extract selectable plain text from a PDF document buffer.
+ * Powered by unpdf (serverless / edge-optimized PDF.js build with zero DOM/canvas dependencies).
+ */
+export async function extractPdfText(
+    pdfBuffer: ArrayBuffer | Uint8Array,
+    aiBinding?: unknown
+): Promise<string> {
+    const pages = await extractPdfPages(pdfBuffer, aiBinding)
+    return pages.map((p) => p.text).join("\n\n")
 }

@@ -170,6 +170,11 @@ export interface R2BucketBinding {
     }>
 }
 
+export interface DocumentChunk {
+    text: string
+    pageNumber?: number
+}
+
 export interface VectorizeMatch {
     id: string
     score: number

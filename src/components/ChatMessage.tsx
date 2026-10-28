@@ -21,10 +21,21 @@ interface ChatMessageProps {
     onRegenerate?: () => void
 }
 
+const TRAILING_PAGE_BADGE_REGEX =
+    /(?:\n+|^)(?:[-*_\s]*\n+)?(?:\*{0,2}📄\s*|\*{0,2}\[(?:Source:\s*)?|\*{1,2}(?:Source:?)?\*{1,2}\s*|\bSource:\s*)?\*{0,2}(?:PDF\s*)?Pages?\s*:?\s*(\d+(?:\s*[,-–]\s*\d+)*)\*{0,2}\]?\s*$/i
+
 export function ChatMessage({ message, isStreaming = false, onRegenerate }: ChatMessageProps) {
     const isUser = message.role === "user"
     const [copied, setCopied] = useState(false)
     const [isThinkingOpen, setIsThinkingOpen] = useState(false)
+
+    const pageMatch =
+        !isStreaming && message.content ? message.content.match(TRAILING_PAGE_BADGE_REGEX) : null
+    const mainContent =
+        pageMatch && pageMatch.index !== undefined && pageMatch.index > 0
+            ? message.content.slice(0, pageMatch.index).trim()
+            : message.content
+    const pageBadgeStr = pageMatch ? pageMatch[1].trim() : null
 
     const handleCopy = () => {
         navigator.clipboard.writeText(message.content)
@@ -169,14 +180,33 @@ export function ChatMessage({ message, isStreaming = false, onRegenerate }: Chat
 
                 {/* Message Content */}
                 <div className="text-sm leading-relaxed text-[var(--text-primary)] break-words">
-                    {message.content ? (
-                        <MarkdownRenderer content={message.content} />
+                    {mainContent ? (
+                        <MarkdownRenderer content={mainContent} />
                     ) : isStreaming ? (
                         <span className="inline-flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
                             <span className="inline-block w-2 h-2 rounded-full bg-[var(--accent)] animate-ping" />
                             Generating response...
                         </span>
                     ) : null}
+
+                    {/* PDF Page Citation Badge */}
+                    {pageBadgeStr && (
+                        <div className="mt-3 pt-2.5 flex items-center gap-2">
+                            <span
+                                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/20 shadow-2xs hover:bg-red-500/15 transition-colors"
+                                title={`Information sourced from PDF page ${pageBadgeStr}`}
+                            >
+                                <FileTextIcon size={13} className="text-red-500 shrink-0" />
+                                <span>
+                                    PDF{" "}
+                                    {pageBadgeStr.includes(",") || pageBadgeStr.includes("-")
+                                        ? "Pages"
+                                        : "Page"}{" "}
+                                    {pageBadgeStr}
+                                </span>
+                            </span>
+                        </div>
+                    )}
                 </div>
 
                 {/* Action Toolbar */}

@@ -105,6 +105,7 @@ export async function DELETE(req: Request, context: { params: Promise<{ id: stri
                 `uploads/${id}`,
                 `extracted/${id}.txt`,
                 `intermediates/${id}/extracted.txt`,
+                `intermediates/${id}/pages.json`,
                 `intermediates/${id}/chunks.json`,
                 `intermediates/${id}/vectors.json`,
             ])

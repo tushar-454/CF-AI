@@ -1,8 +1,14 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
-import { extractPdfText } from "./pdf"
-import { chunkText, getEmbeddings } from "./rag"
+import { extractPdfPages } from "./pdf"
+import { chunkPages, chunkText, getEmbeddings } from "./rag"
 import { failDocument, getDocument, updateDocumentProgress } from "./db"
-import type { AppEnv, DocumentProgressEvent, DocumentStage, VectorizeIndexBinding } from "./types"
+import type {
+    AppEnv,
+    DocumentChunk,
+    DocumentProgressEvent,
+    DocumentStage,
+    VectorizeIndexBinding,
+} from "./types"
 
 export interface PdfWorkflowParams {
     documentId: string
@@ -91,8 +97,9 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 return { size: obj.size }
             })
 
-            // Step 2: Extract PDF plain text (deterministic: do not retry permanent text extraction failures)
+            // Step 2: Extract PDF pages and plain text (deterministic: do not retry permanent text extraction failures)
             const extractedTextKey = `intermediates/${documentId}/extracted.txt`
+            const pagesKey = `intermediates/${documentId}/pages.json`
             await step.do("extract-pdf-text", async () => {
                 const r2 = this.env.FILES!
                 const obj = await r2.get(r2Key)
@@ -101,7 +108,8 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 }
 
                 const arrayBuffer = await obj.arrayBuffer()
-                const text = await extractPdfText(arrayBuffer, this.env.AI)
+                const pages = await extractPdfPages(arrayBuffer, this.env.AI)
+                const text = pages.map((p) => p.text).join("\n\n")
 
                 if (!text || !text.trim()) {
                     throw new Error(
@@ -119,22 +127,51 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     customMetadata: { documentId, fileName },
                 })
 
-                await report("chunking", 30, `Extracted text from "${fileName}". Preparing chunks.`)
-                return { textLength: text.length }
+                // Save page-by-page breakdown for page citations and vectorized metadata
+                await r2.put(pagesKey, JSON.stringify(pages), {
+                    httpMetadata: { contentType: "application/json" },
+                    customMetadata: { documentId, fileName, totalPages: String(pages.length) },
+                })
+
+                await report(
+                    "chunking",
+                    30,
+                    `Extracted ${pages.length} page(s) from "${fileName}". Preparing chunks.`
+                )
+                return { textLength: text.length, totalPages: pages.length }
             })
 
-            // Step 3: Chunk text using natural boundaries
+            // Step 3: Chunk text using natural boundaries, preserving page numbers
             const chunksKey = `intermediates/${documentId}/chunks.json`
             const chunkMeta = await step.do("chunk-extracted-text", async () => {
                 const r2 = this.env.FILES!
-                const textObj = await r2.get(extractedTextKey)
-                if (!textObj) {
-                    throw new Error("Intermediate extracted text missing from R2.")
+                const pagesObj = await r2.get(pagesKey)
+                let chunks: DocumentChunk[] = []
+
+                if (pagesObj) {
+                    const rawPages = await (pagesObj.text
+                        ? pagesObj.text()
+                        : new TextDecoder().decode(await pagesObj.arrayBuffer()))
+                    const pages = JSON.parse(rawPages) as Array<{
+                        pageNumber: number
+                        text: string
+                    }>
+                    if (Array.isArray(pages) && pages.length > 0) {
+                        chunks = chunkPages(pages)
+                    }
                 }
-                const text = await (textObj.text
-                    ? textObj.text()
-                    : new TextDecoder().decode(await textObj.arrayBuffer()))
-                const chunks = chunkText(text)
+
+                if (chunks.length === 0) {
+                    const textObj = await r2.get(extractedTextKey)
+                    if (!textObj) {
+                        throw new Error("Intermediate extracted text missing from R2.")
+                    }
+                    const text = await (textObj.text
+                        ? textObj.text()
+                        : new TextDecoder().decode(await textObj.arrayBuffer()))
+                    const strChunks = chunkText(text)
+                    chunks = strChunks.map((c) => ({ text: c, pageNumber: 1 }))
+                }
 
                 if (chunks.length === 0) {
                     throw new Error(`Could not generate readable text chunks from "${fileName}".`)
@@ -148,7 +185,7 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 await report(
                     "embedding",
                     50,
-                    `Created ${chunks.length} text chunks. Generating embeddings.`,
+                    `Created ${chunks.length} text chunks across pages. Generating embeddings.`,
                     {
                         totalChunks: chunks.length,
                     }
@@ -183,9 +220,12 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     const rawChunks = await (chunksObj.text
                         ? chunksObj.text()
                         : new TextDecoder().decode(await chunksObj.arrayBuffer()))
-                    const chunks = JSON.parse(rawChunks) as string[]
+                    const parsed = JSON.parse(rawChunks) as Array<
+                        string | { text: string; pageNumber?: number }
+                    >
+                    const chunkTexts = parsed.map((c) => (typeof c === "string" ? c : c.text))
 
-                    const vectors = await getEmbeddings(ai, chunks)
+                    const vectors = await getEmbeddings(ai, chunkTexts)
 
                     await r2.put(vectorsKey, JSON.stringify(vectors), {
                         httpMetadata: { contentType: "application/json" },
@@ -195,9 +235,9 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     await report(
                         "indexing",
                         75,
-                        `Computed vector embeddings for ${chunks.length} chunks. Indexing into Vectorize.`,
+                        `Computed vector embeddings for ${parsed.length} chunks. Indexing into Vectorize.`,
                         {
-                            totalChunks: chunks.length,
+                            totalChunks: parsed.length,
                         }
                     )
 
@@ -205,7 +245,7 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 }
             )
 
-            // Step 5: Upsert vectors into Vectorize with batching
+            // Step 5: Upsert vectors into Vectorize with batching and pageNumber metadata
             await step.do(
                 "index-vectors",
                 {
@@ -235,7 +275,14 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                         ? vectorsObj.text()
                         : new TextDecoder().decode(await vectorsObj.arrayBuffer()))
 
-                    const chunks = JSON.parse(rawChunks) as string[]
+                    const parsed = JSON.parse(rawChunks) as Array<
+                        string | { text: string; pageNumber?: number }
+                    >
+                    const chunks: DocumentChunk[] = parsed.map((c) =>
+                        typeof c === "string"
+                            ? { text: c, pageNumber: 1 }
+                            : { text: c.text, pageNumber: c.pageNumber ?? 1 }
+                    )
                     const vectors = JSON.parse(rawVectors) as number[][]
 
                     const records = chunks.map((chunk, index) => ({
@@ -246,7 +293,8 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                             conversationId: conversationId || "",
                             name: fileName,
                             chunkIndex: index,
-                            text: chunk.slice(0, 1500),
+                            pageNumber: chunk.pageNumber ?? 1,
+                            text: chunk.text.slice(0, 1500),
                         },
                     }))
 
@@ -361,4 +409,3 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
         }
     }
 }
-

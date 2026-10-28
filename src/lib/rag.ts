@@ -3,6 +3,7 @@ import { EMBEDDING_MODEL_ID } from "./models"
 import { extractPdfText } from "./pdf"
 import type {
     AppEnv,
+    DocumentChunk,
     R2BucketBinding,
     VectorizeIndexBinding,
     VectorizeMatch,
@@ -82,6 +83,27 @@ export function chunkText(text: string, chunkSize: number = 800, overlap: number
 }
 
 /**
+ * Split text pages into chunks while preserving originating PDF page numbers.
+ */
+export function chunkPages(
+    pages: Array<{ pageNumber: number; text: string }>,
+    chunkSize: number = 800,
+    overlap: number = 100
+): DocumentChunk[] {
+    const chunks: DocumentChunk[] = []
+    for (const page of pages) {
+        const pageChunks = chunkText(page.text, chunkSize, overlap)
+        for (const chunk of pageChunks) {
+            chunks.push({
+                text: chunk,
+                pageNumber: page.pageNumber,
+            })
+        }
+    }
+    return chunks
+}
+
+/**
  * Embed an array of texts in batches using @cf/baai/bge-base-en-v1.5
  */
 export async function getEmbeddings(ai: WorkersAi, texts: string[]): Promise<number[][]> {
@@ -117,14 +139,34 @@ export async function indexDocument(
     documentId: string,
     docName: string,
     content: string,
+    conversationId?: string | null,
+    pageNumber?: number
+): Promise<{ chunksIndexed: number }> {
+    const stringChunks = chunkText(content)
+    const chunks: DocumentChunk[] = stringChunks.map((text) => ({
+        text,
+        pageNumber: pageNumber ?? 1,
+    }))
+    return indexDocumentChunks(ai, vectorize, documentId, docName, chunks, conversationId)
+}
+
+/**
+ * Chunk, embed, and upsert pre-structured chunks (with page numbers) into Vectorize.
+ */
+export async function indexDocumentChunks(
+    ai: WorkersAi,
+    vectorize: VectorizeIndexBinding,
+    documentId: string,
+    docName: string,
+    chunks: DocumentChunk[],
     conversationId?: string | null
 ): Promise<{ chunksIndexed: number }> {
-    const chunks = chunkText(content)
     if (chunks.length === 0) {
         return { chunksIndexed: 0 }
     }
 
-    const vectors = await getEmbeddings(ai, chunks)
+    const texts = chunks.map((c) => c.text)
+    const vectors = await getEmbeddings(ai, texts)
 
     const vectorizeRecords = chunks.map((chunk, index) => ({
         id: `${documentId}_${index}`,
@@ -134,7 +176,8 @@ export async function indexDocument(
             conversationId: conversationId || "",
             name: docName,
             chunkIndex: index,
-            text: chunk.slice(0, 1500), // Keep the full chunk text for RAG prompt context
+            pageNumber: chunk.pageNumber ?? 1,
+            text: chunk.text.slice(0, 1500), // Keep the full chunk text for RAG prompt context
         },
     }))
 
@@ -155,6 +198,7 @@ export interface RetrievedChunk {
     name: string
     chunkIndex: number
     text: string
+    pageNumber?: number
 }
 
 /**
@@ -207,12 +251,17 @@ export async function queryKnowledge(
     const results: RetrievedChunk[] = searchResult.matches.map((m: VectorizeMatch) => {
         const idDocId = m.id.includes("_") ? m.id.substring(0, m.id.lastIndexOf("_")) : m.id
         const docId = String(m.metadata?.documentId || idDocId || "")
+        const pageNum =
+            m.metadata?.pageNumber !== undefined && m.metadata?.pageNumber !== null
+                ? Number(m.metadata.pageNumber)
+                : undefined
         return {
             score: m.score,
             documentId: docId,
             conversationId: String(m.metadata?.conversationId || ""),
             name: String(m.metadata?.name || "Document"),
             chunkIndex: Number(m.metadata?.chunkIndex || 0),
+            pageNumber: pageNum,
             text: String(m.metadata?.text || ""),
         }
     })
@@ -263,9 +312,11 @@ export async function getDocumentR2Text(
             const raw = chunksObj.text
                 ? await chunksObj.text()
                 : new TextDecoder().decode(await chunksObj.arrayBuffer())
-            const chunks = JSON.parse(raw) as string[]
-            if (Array.isArray(chunks) && chunks.length > 0) {
-                return chunks.join("\n\n")
+            const parsed = JSON.parse(raw) as Array<string | { text: string }>
+            if (Array.isArray(parsed) && parsed.length > 0) {
+                return parsed
+                    .map((item) => (typeof item === "string" ? item : item.text || ""))
+                    .join("\n\n")
             }
         }
     } catch {}
@@ -322,7 +373,7 @@ export async function getDocumentChunks(
 ): Promise<RetrievedChunk[]> {
     if (!r2) return []
 
-    let chunks: string[] = []
+    let chunks: DocumentChunk[] = []
 
     // 1. Try reading pre-computed chunks
     try {
@@ -331,18 +382,39 @@ export async function getDocumentChunks(
             const raw = chunksObj.text
                 ? await chunksObj.text()
                 : new TextDecoder().decode(await chunksObj.arrayBuffer())
-            const parsed = JSON.parse(raw) as string[]
+            const parsed = JSON.parse(raw) as Array<string | { text: string; pageNumber?: number }>
             if (Array.isArray(parsed) && parsed.length > 0) {
-                chunks = parsed
+                chunks = parsed.map((item) =>
+                    typeof item === "string"
+                        ? { text: item, pageNumber: 1 }
+                        : { text: item.text || "", pageNumber: item.pageNumber ?? 1 }
+                )
             }
         }
     } catch {}
 
-    // 2. If no chunks file, get document text and chunk it
+    // 2. If no chunks file, check if pages.json exists
+    if (chunks.length === 0) {
+        try {
+            const pagesObj = await r2.get(`intermediates/${docId}/pages.json`)
+            if (pagesObj) {
+                const rawP = pagesObj.text
+                    ? await pagesObj.text()
+                    : new TextDecoder().decode(await pagesObj.arrayBuffer())
+                const pages = JSON.parse(rawP) as Array<{ pageNumber: number; text: string }>
+                if (Array.isArray(pages) && pages.length > 0) {
+                    chunks = chunkPages(pages)
+                }
+            }
+        } catch {}
+    }
+
+    // 3. Fallback: get document text and chunk it
     if (chunks.length === 0) {
         const text = await getDocumentR2Text(r2, docId, docName, ai)
         if (text) {
-            chunks = chunkText(text)
+            const strChunks = chunkText(text)
+            chunks = strChunks.map((str) => ({ text: str, pageNumber: 1 }))
             if (chunks.length > 0) {
                 // Asynchronously save chunks to R2 so subsequent queries are fast
                 r2.put(`intermediates/${docId}/chunks.json`, JSON.stringify(chunks), {
@@ -394,10 +466,11 @@ export async function getDocumentChunks(
         index: number
         score: number
         chunk: string
+        pageNumber?: number
     }
 
-    const scored: ScoredIndex[] = chunks.map((chunk, index) => {
-        const lowerChunk = chunk.toLowerCase()
+    const scored: ScoredIndex[] = chunks.map((item, index) => {
+        const lowerChunk = item.text.toLowerCase()
         let matchCount = 0
         for (const term of queryTerms) {
             if (lowerChunk.includes(term)) {
@@ -410,7 +483,7 @@ export async function getDocumentChunks(
         if (index === 0) score += 2
         else if (index === 1) score += 1
 
-        return { index, score, chunk }
+        return { index, score, chunk: item.text, pageNumber: item.pageNumber }
     })
 
     scored.sort((a, b) => b.score - a.score)
@@ -425,6 +498,7 @@ export async function getDocumentChunks(
         documentId: docId,
         name: docName,
         chunkIndex: item.index,
+        pageNumber: item.pageNumber,
         text: item.chunk,
     }))
 }
@@ -453,13 +527,7 @@ export async function retrieveDocumentContext(
     // 1. Try Vectorize semantic query if bindings are available
     if (ai && vectorize) {
         try {
-            const rawVectorChunks = await queryKnowledge(
-                ai,
-                vectorize,
-                query,
-                20,
-                selectedDocIds
-            )
+            const rawVectorChunks = await queryKnowledge(ai, vectorize, query, 20, selectedDocIds)
 
             for (const chunk of rawVectorChunks) {
                 if (chunk.documentId && chunksByDocId.has(chunk.documentId)) {
@@ -536,4 +604,3 @@ export async function deleteDocumentVectors(
         // Vector deletion is best-effort and asynchronous in Vectorize
     }
 }
-
