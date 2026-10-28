@@ -102,6 +102,17 @@ export function subscribeToVideoProgress(
 
                     try {
                         const event = JSON.parse(dataStr) as YoutubeProgressEvent
+                        if (event.diagnostic) {
+                            console.warn(
+                                `[youtube-transcript] Primary provider failed; fallback started`,
+                                {
+                                    requestId: event.diagnostic.requestId,
+                                    provider: event.diagnostic.provider,
+                                    failureCategory: event.diagnostic.failureCategory,
+                                    message: event.diagnostic.message,
+                                }
+                            )
+                        }
                         if (eventName === "ready" || event.status === "ready") {
                             callbacks.onReady?.(event)
                             aborted = true

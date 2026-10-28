@@ -5,6 +5,7 @@
     "packageManager": "npm@11.19.0",
     "dependencies": {
         "@vinext/cloudflare": "latest",
+        "extract-youtube": "^1.0.536",
         "marked": "^18.1.2",
         "react": "latest",
         "react-dom": "latest",

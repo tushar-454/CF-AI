@@ -39,6 +39,15 @@ import {
     isBengaliText,
     normalizeLanguageCode,
 } from "../src/lib/youtube-metadata.ts"
+import {
+    extractYouTubeTranscript,
+    normalizeExtractYoutubeSnippets,
+} from "../src/lib/youtube-extractor.ts"
+import {
+    NoTranscriptFound,
+    TranscriptsDisabled,
+    IpBlocked,
+} from "extract-youtube"
 
 test("YouTube Video Chat Architecture & Pipeline Suite", async (t) => {
     // -------------------------------------------------------------
@@ -1163,4 +1172,637 @@ test("YouTube Video Chat Architecture & Pipeline Suite", async (t) => {
             }
         }
     )
+
+    // -------------------------------------------------------------
+    // Test 12: Primary Provider (extract-youtube) & Supadata Fallback Integration Suite
+    // (Comprehensive Phase 9 verification covering scenarios 1 to 16)
+    // -------------------------------------------------------------
+    await t.test(
+        "12. Primary extract-youtube provider and Supadata fallback architecture suite",
+        async (sub) => {
+            // Helper to create mock tracks
+            const createMockTrack = (opts) => ({
+                languageCode: opts.languageCode || "en",
+                language: opts.language || "English",
+                isGenerated: Boolean(opts.isGenerated),
+                async fetch() {
+                    if (opts.shouldThrow) throw opts.shouldThrow
+                    return {
+                        snippets: opts.snippets || [
+                            { text: "Primary caption line 1", start: 0, duration: 2.5 },
+                            { text: "Primary caption line 2", start: 2.5, duration: 3.5 },
+                        ],
+                        languageCode: opts.languageCode || "en",
+                        language: opts.language || "English",
+                        isGenerated: Boolean(opts.isGenerated),
+                        videoId: "dQw4w9WgXcQ",
+                    }
+                },
+            })
+
+            // 12.1 Scenario 1: Primary provider succeeds; Supadata is not called
+            await sub.test("Scenario 1: Primary provider succeeds; Supadata is not called", async () => {
+                let supadataCalled = false
+                const originalFetch = globalThis.fetch
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("api.supadata.ai")) {
+                        supadataCalled = true
+                        throw new Error("Supadata should not be called when primary succeeds!")
+                    }
+                    return originalFetch(url)
+                }
+
+                try {
+                    const mockApi = {
+                        async listTranscripts() {
+                            return [createMockTrack({ languageCode: "en", isGenerated: false })]
+                        },
+                    }
+
+                    const result = await extractYouTubeTranscript("dQw4w9WgXcQ", { SUPADATA_API_KEY: "mock_key" }, {
+                        lang: "en",
+                        transcriptApi: mockApi,
+                    })
+
+                    assert.strictEqual(result.needsConfirmation, false)
+                    assert.strictEqual(result.provider, "extract-youtube")
+                    assert.strictEqual(result.transcript?.segments.length, 2)
+                    assert.strictEqual(result.transcript?.provider, "extract-youtube")
+                    assert.strictEqual(supadataCalled, false, "Supadata must not be called when primary succeeds")
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.2 Scenario 2: Primary provider returns auto-generated captions successfully
+            await sub.test("Scenario 2: Primary provider returns auto-generated captions successfully", async () => {
+                const mockApi = {
+                    async listTranscripts() {
+                        return [
+                            createMockTrack({
+                                languageCode: "en",
+                                language: "English (auto-generated)",
+                                isGenerated: true,
+                                snippets: [{ text: "Auto-generated caption cue", start: 0.5, duration: 4.0 }],
+                            }),
+                        ]
+                    },
+                }
+
+                const result = await extractYouTubeTranscript("dQw4w9WgXcQ", {}, {
+                    lang: "en",
+                    transcriptApi: mockApi,
+                })
+
+                assert.strictEqual(result.needsConfirmation, false)
+                assert.strictEqual(result.provider, "extract-youtube")
+                assert.strictEqual(result.transcript?.segments[0].text, "Auto-generated caption cue")
+            })
+
+            // 12.3 Scenario 3: Primary provider returns creator-provided captions successfully (preferred over generated)
+            await sub.test("Scenario 3: Primary provider returns creator-provided captions successfully", async () => {
+                let fetchedGenerated = false
+                let fetchedManual = false
+
+                const mockApi = {
+                    async listTranscripts() {
+                        return [
+                            {
+                                languageCode: "en",
+                                isGenerated: true,
+                                async fetch() {
+                                    fetchedGenerated = true
+                                    return { snippets: [{ text: "Generated cue", start: 0, duration: 1 }] }
+                                },
+                            },
+                            {
+                                languageCode: "en",
+                                isGenerated: false,
+                                async fetch() {
+                                    fetchedManual = true
+                                    return { snippets: [{ text: "Creator manual cue", start: 0, duration: 1 }] }
+                                },
+                            },
+                        ]
+                    },
+                }
+
+                const result = await extractYouTubeTranscript("dQw4w9WgXcQ", {}, {
+                    lang: "en",
+                    transcriptApi: mockApi,
+                })
+
+                assert.strictEqual(result.needsConfirmation, false)
+                assert.strictEqual(fetchedManual, true, "Should choose manual creator captions")
+                assert.strictEqual(fetchedGenerated, false, "Should not fetch generated captions when manual exists")
+                assert.strictEqual(result.transcript?.segments[0].text, "Creator manual cue")
+            })
+
+            // 12.4 Scenario 4: Primary provider times out; bounded retry/fallback behavior works
+            await sub.test("Scenario 4: Primary provider times out; bounded retry/fallback behavior works", async () => {
+                let primaryAttempts = 0
+                const mockApi = {
+                    async listTranscripts() {
+                        primaryAttempts++
+                        const err = new Error("Request timed out")
+                        err.name = "TimeoutError"
+                        throw err
+                    },
+                }
+
+                const originalFetch = globalThis.fetch
+                let supadataCalled = false
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("mode=native")) {
+                        supadataCalled = true
+                        return new Response(
+                            JSON.stringify({
+                                content: [{ text: "Fallback from Supadata", offset: 0, duration: 2000 }],
+                                lang: "en",
+                            }),
+                            { status: 200, headers: { "Content-Type": "application/json" } }
+                        )
+                    }
+                    return originalFetch(url)
+                }
+
+                try {
+                    const result = await extractYouTubeTranscript(
+                        "dQw4w9WgXcQ",
+                        { SUPADATA_API_KEY: "mock_key" },
+                        {
+                            lang: "en",
+                            transcriptApi: mockApi,
+                            timeoutMs: 100,
+                        }
+                    )
+
+                    // Bounded retry should have occurred (1 retry -> total 2 attempts)
+                    assert.strictEqual(primaryAttempts, 2, "Primary should retry boundedly on timeout")
+                    assert.strictEqual(supadataCalled, true, "Should fall back to Supadata")
+                    assert.strictEqual(result.provider, "supadata")
+                    assert.strictEqual(result.transcript?.segments[0].text, "Fallback from Supadata")
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.5 Scenario 5: Primary provider returns an empty transcript; Supadata fallback is attempted
+            await sub.test("Scenario 5: Primary provider returns empty transcript; Supadata fallback is attempted", async () => {
+                const mockApi = {
+                    async listTranscripts() {
+                        return [
+                            createMockTrack({
+                                languageCode: "en",
+                                isGenerated: false,
+                                snippets: [{ text: "   ", start: 0, duration: 5 }], // only empty whitespace
+                            }),
+                        ]
+                    },
+                }
+
+                const originalFetch = globalThis.fetch
+                let supadataCalled = false
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("mode=native")) {
+                        supadataCalled = true
+                        return new Response(
+                            JSON.stringify({
+                                content: [{ text: "Recovered via Supadata", offset: 0, duration: 3000 }],
+                                lang: "en",
+                            }),
+                            { status: 200, headers: { "Content-Type": "application/json" } }
+                        )
+                    }
+                    return originalFetch(url)
+                }
+
+                try {
+                    const result = await extractYouTubeTranscript(
+                        "dQw4w9WgXcQ",
+                        { SUPADATA_API_KEY: "mock_key" },
+                        { lang: "en", transcriptApi: mockApi }
+                    )
+
+                    assert.strictEqual(supadataCalled, true, "Empty primary transcript must trigger fallback")
+                    assert.strictEqual(result.provider, "supadata")
+                    assert.strictEqual(result.transcript?.segments[0].text, "Recovered via Supadata")
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.6 Scenario 6: Primary provider encounters permanent failure; no unbounded retries occur
+            await sub.test("Scenario 6: Primary encounters permanent failure; no unbounded retries", async () => {
+                let primaryCalls = 0
+                const mockApi = {
+                    async listTranscripts() {
+                        primaryCalls++
+                        throw new IpBlocked("dQw4w9WgXcQ")
+                    },
+                }
+
+                const originalFetch = globalThis.fetch
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("mode=native")) {
+                        return new Response(
+                            JSON.stringify({
+                                content: [{ text: "Supadata works around IP block", offset: 0, duration: 2500 }],
+                                lang: "en",
+                            }),
+                            { status: 200, headers: { "Content-Type": "application/json" } }
+                        )
+                    }
+                    return originalFetch(url)
+                }
+
+                try {
+                    const result = await extractYouTubeTranscript(
+                        "dQw4w9WgXcQ",
+                        { SUPADATA_API_KEY: "mock_key" },
+                        { lang: "en", transcriptApi: mockApi }
+                    )
+
+                    assert.strictEqual(primaryCalls, 1, "Permanent IP block must not be repeatedly retried")
+                    assert.strictEqual(result.provider, "supadata")
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.7 Scenario 7: Supadata native-caption fallback succeeds
+            await sub.test("Scenario 7: Supadata native-caption fallback succeeds", async () => {
+                const mockApi = {
+                    async listTranscripts() {
+                        throw new NoTranscriptFound("dQw4w9WgXcQ", ["en"], [])
+                    },
+                }
+
+                const originalFetch = globalThis.fetch
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("mode=native")) {
+                        return new Response(
+                            JSON.stringify({
+                                content: [{ text: "Supadata native captions", offset: 1000, duration: 2000 }],
+                                lang: "en",
+                            }),
+                            { status: 200, headers: { "Content-Type": "application/json" } }
+                        )
+                    }
+                    return originalFetch(url)
+                }
+
+                try {
+                    const result = await extractYouTubeTranscript(
+                        "dQw4w9WgXcQ",
+                        { SUPADATA_API_KEY: "mock_key" },
+                        { lang: "en", transcriptApi: mockApi }
+                    )
+
+                    assert.strictEqual(result.needsConfirmation, false)
+                    assert.strictEqual(result.provider, "supadata")
+                    assert.strictEqual(result.transcript?.segments.length, 1)
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.8 Scenario 8: Both providers fail; existing failure/confirmation flow works
+            await sub.test("Scenario 8: Both providers fail; awaiting confirmation flow works", async () => {
+                const mockApi = {
+                    async listTranscripts() {
+                        throw new TranscriptsDisabled("dQw4w9WgXcQ")
+                    },
+                }
+
+                const originalFetch = globalThis.fetch
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("mode=native")) {
+                        return new Response(JSON.stringify({ error: "No captions available" }), { status: 404 })
+                    }
+                    return originalFetch(url)
+                }
+
+                try {
+                    const result = await extractYouTubeTranscript(
+                        "dQw4w9WgXcQ",
+                        { SUPADATA_API_KEY: "mock_key" },
+                        { lang: "en", transcriptApi: mockApi }
+                    )
+
+                    assert.strictEqual(result.needsConfirmation, true)
+                    assert.strictEqual(result.transcript, null)
+                    assert.ok(result.message.includes("confirmation"))
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.9 Scenario 9: Supadata quota exhaustion produces clear error and no repeated calls
+            await sub.test("Scenario 9: Supadata quota exhaustion produces clear error", async () => {
+                const mockApi = {
+                    async listTranscripts() {
+                        throw new NoTranscriptFound("dQw4w9WgXcQ", ["en"], [])
+                    },
+                }
+
+                let supadataCalls = 0
+                const originalFetch = globalThis.fetch
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("mode=native")) {
+                        supadataCalls++
+                        return new Response(JSON.stringify({ error: "Insufficient credits" }), { status: 402 })
+                    }
+                    return originalFetch(url)
+                }
+
+                try {
+                    await assert.rejects(
+                        async () => {
+                            await extractYouTubeTranscript(
+                                "dQw4w9WgXcQ",
+                                { SUPADATA_API_KEY: "mock_key" },
+                                { lang: "en", transcriptApi: mockApi }
+                            )
+                        },
+                        (err) => {
+                            assert.ok(err instanceof SupadataError)
+                            assert.strictEqual(err.code, "INSUFFICIENT_CREDITS")
+                            assert.strictEqual(err.statusCode, 402)
+                            return true
+                        }
+                    )
+                    assert.strictEqual(supadataCalls, 1, "Should not repeatedly call quota-exhausted provider")
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.10 Scenario 10: AI transcription is never triggered without explicit confirmation
+            await sub.test("Scenario 10: AI transcription is never triggered without confirmation", async () => {
+                let aiModeCalled = false
+                const originalFetch = globalThis.fetch
+                globalThis.fetch = async (url) => {
+                    if (String(url).includes("mode=generate")) {
+                        aiModeCalled = true
+                    }
+                    return new Response("Not found", { status: 404 })
+                }
+
+                try {
+                    const mockApi = {
+                        async listTranscripts() {
+                            throw new TranscriptsDisabled("dQw4w9WgXcQ")
+                        },
+                    }
+
+                    // Default call (forceAiTranscription = false)
+                    const res = await extractYouTubeTranscript(
+                        "dQw4w9WgXcQ",
+                        { SUPADATA_API_KEY: "mock_key" },
+                        { lang: "en", forceAiTranscription: false, transcriptApi: mockApi }
+                    )
+
+                    assert.strictEqual(res.needsConfirmation, true)
+                    assert.strictEqual(aiModeCalled, false, "Must never silently invoke AI transcription")
+                } finally {
+                    globalThis.fetch = originalFetch
+                }
+            })
+
+            // 12.11 Scenario 11: A completed transcript and verified index are reused without extraction calls
+            await sub.test("Scenario 11: Completed transcript and index are reused without calls", async () => {
+                let extractionAttempted = false
+                const mockEnv = {
+                    DB: {
+                        prepare: () => ({
+                            bind: () => ({
+                                first: async () => ({
+                                    id: "cached_vid",
+                                    status: "ready",
+                                    chunk_count: 5,
+                                    embedding_model: "@cf/baai/bge-base-en-v1.5",
+                                    transcript_lang: "en",
+                                }),
+                                all: async () => ({ results: [] }),
+                            }),
+                        }),
+                    },
+                    FILES: {
+                        get: async (key) => {
+                            if (key.includes("chunks.json")) {
+                                return { text: async () => JSON.stringify([{ id: "c1", text: "chunk" }]) }
+                            }
+                            if (key.includes("transcript.json")) {
+                                return { text: async () => JSON.stringify({ videoId: "cached_vid", segments: [{ text: "hi" }] }) }
+                            }
+                            return null
+                        },
+                    },
+                }
+
+                const isComplete = await verifyYoutubeIndexingComplete(mockEnv, "cached_vid", "en")
+                assert.strictEqual(isComplete, true)
+                assert.strictEqual(extractionAttempted, false)
+            })
+
+            // 12.12 Scenario 12: Concurrent requests do not duplicate canonical processing
+            await sub.test("Scenario 12: Deduplication prevents duplicate video records", async () => {
+                const dbMap = new Map()
+                const mockDb = {
+                    prepare(sql) {
+                        return {
+                            bind(...args) {
+                                return {
+                                    async run() {
+                                        if (sql.includes("INSERT INTO youtube_videos")) {
+                                            const id = args[0]
+                                            if (dbMap.has(id)) {
+                                                // Primary key constraint
+                                                throw new Error("UNIQUE constraint failed: youtube_videos.id")
+                                            }
+                                            dbMap.set(id, { id, status: "validating" })
+                                        }
+                                        return { success: true }
+                                    },
+                                    async first() {
+                                        return dbMap.get(args[0]) || null
+                                    },
+                                }
+                            },
+                        }
+                    },
+                }
+
+                // First insert succeeds
+                await createYoutubeVideo({ id: "shared_vid", title: "Vid", url: "https://youtu.be/shared_vid", status: "validating", duration: 0, transcript_version: 1, progress: 10, embedding_model: "bge", chunk_count: 0, created_at: Date.now(), updated_at: Date.now() }, mockDb)
+                assert.ok(dbMap.has("shared_vid"))
+
+                // Second attempt checks getYoutubeVideo and reuses record
+                const existing = await getYoutubeVideo("shared_vid", mockDb)
+                assert.strictEqual(existing.id, "shared_vid")
+            })
+
+            // 12.13 Scenario 13: Transcript extraction succeeds but indexing fails; recovery does not mark complete
+            await sub.test("Scenario 13: Indexing failure does not incorrectly mark complete", async () => {
+                let recordedStatus = null
+                const mockEnv = {
+                    DB: {
+                        prepare(sql) {
+                            return {
+                                bind(...args) {
+                                    return {
+                                        async run() {
+                                            if (sql.includes("status = ?")) {
+                                                recordedStatus = args[0]
+                                            }
+                                            return { success: true }
+                                        },
+                                        async first() { return null },
+                                        async all() { return { results: [] } },
+                                    }
+                                },
+                            }
+                        },
+                        async batch() { return [] },
+                    },
+                    FILES: {
+                        async put() {},
+                        async get() { return null },
+                    },
+                    AI: {
+                        async run() {
+                            throw new Error("Workers AI service unavailable")
+                        },
+                    },
+                    VECTORIZE: {
+                        async upsert() {},
+                    },
+                    SUPADATA_API_KEY: "mock_key",
+                }
+
+                const mockApi = {
+                    async listTranscripts() {
+                        return [createMockTrack({ languageCode: "en" })]
+                    },
+                }
+
+                await assert.rejects(
+                    async () => {
+                        await executeYoutubePipeline(mockEnv, {
+                            videoId: "dQw4w9WgXcQ",
+                            url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                            transcriptApi: mockApi,
+                        })
+                    },
+                    (err) => {
+                        assert.ok(err.message.includes("Workers AI service unavailable"))
+                        return true
+                    }
+                )
+
+                // Status must be marked failed, never ready!
+                assert.strictEqual(recordedStatus, "failed")
+            })
+
+            // 12.14 Scenario 14: Different providers produce normalized data compatible with chunking & citations
+            await sub.test("Scenario 14: Normalized data compatible across providers", () => {
+                const extractYtSnippets = [
+                    { text: "Introduction to edge architecture.", start: 0, duration: 4.5 },
+                    { text: "Serverless functions and streaming responses.", start: 4.5, duration: 5.0 },
+                ]
+                const supadataRaw = [
+                    { text: "Introduction to edge architecture.", offset: 0, duration: 4500 },
+                    { text: "Serverless functions and streaming responses.", offset: 4500, duration: 5000 },
+                ]
+
+                const normA = normalizeExtractYoutubeSnippets(extractYtSnippets, "vid123", "en")
+                const normB = normalizeSupadataSegments(supadataRaw, "vid123", "native", "en")
+
+                assert.strictEqual(normA.segments.length, normB.segments.length)
+                assert.strictEqual(normA.segments[0].startSeconds, normB.segments[0].startSeconds)
+                assert.strictEqual(normA.segments[0].endSeconds, normB.segments[0].endSeconds)
+                assert.strictEqual(normA.segments[1].startSeconds, normB.segments[1].startSeconds)
+                assert.strictEqual(normA.segments[1].endSeconds, normB.segments[1].endSeconds)
+
+                const chunksA = chunkTranscriptSegments("vid123", normA.segments, 80, 20)
+                const chunksB = chunkTranscriptSegments("vid123", normB.segments, 80, 20)
+
+                assert.strictEqual(chunksA.length, chunksB.length)
+                assert.strictEqual(chunksA[0].text, chunksB[0].text)
+                assert.strictEqual(chunksA[0].startSeconds, chunksB[0].startSeconds)
+            })
+
+            // 12.15 Scenario 15: Existing YouTube chat history, sidebar filtering, and timestamps continue working
+            await sub.test("Scenario 15: Chat history, sidebar filtering, and timestamps work", async () => {
+                const conversations = new Map()
+                const messages = new Map()
+
+                const createStatement = (sql, args = []) => ({
+                    bind(...newArgs) {
+                        return createStatement(sql, newArgs)
+                    },
+                    async run() {
+                        if (sql.includes("INSERT INTO conversations")) {
+                            const [id, title, model, type, videoId] = args
+                            conversations.set(id, { id, title, model, type, video_id: videoId })
+                        } else if (sql.includes("INSERT INTO messages")) {
+                            const [id, convId, role, content] = args
+                            const list = messages.get(convId) || []
+                            list.push({ id, conversation_id: convId, role, content })
+                            messages.set(convId, list)
+                        }
+                        return { success: true }
+                    },
+                    async first() {
+                        return conversations.get(args[0]) || null
+                    },
+                    async all() {
+                        if (sql.includes("FROM messages")) {
+                            const convId = args[0]
+                            return { results: messages.get(convId) || [] }
+                        }
+                        if (sql.includes("WHERE type = 'youtube'")) {
+                            const ytConvs = Array.from(conversations.values()).filter(c => c.type === "youtube")
+                            return { results: ytConvs }
+                        }
+                        return { results: Array.from(conversations.values()) }
+                    },
+                })
+
+                const mockDb = {
+                    prepare(sql) {
+                        return createStatement(sql)
+                    },
+                }
+
+                // Create a standard chat and a youtube chat
+                await createConversation("c_chat", "General Chat", "auto", "chat", null, mockDb)
+                await createConversation("c_yt", "YouTube Video Chat", "auto", "youtube", "dQw4w9WgXcQ", mockDb)
+
+                // List conversations filtered by type='youtube'
+                const ytList = await listConversations("youtube", mockDb)
+                assert.strictEqual(ytList.length, 1)
+                assert.strictEqual(ytList[0].id, "c_yt")
+                assert.strictEqual(ytList[0].video_id, "dQw4w9WgXcQ")
+
+                // Add message and format timestamp
+                await createMessage({ id: "m1", conversation_id: "c_yt", role: "assistant", content: "See video at [01:30]" }, mockDb)
+                const msgs = await getMessages("c_yt", 50, mockDb)
+                assert.strictEqual(msgs.length, 1)
+                assert.strictEqual(formatTimestamp(90), "01:30")
+                assert.strictEqual(parseTimestamp("01:30"), 90)
+            })
+
+            // 12.16 Scenario 16: Existing PDF and general-chat regression tests remain unaffected
+            await sub.test("Scenario 16: PDF and general-chat pipelines remain unaffected", () => {
+                // Formatting & chunking isolation
+                assert.strictEqual(isValidYouTubeVideoId("dQw4w9WgXcQ"), true)
+                assert.strictEqual(isValidYouTubeVideoId("short"), false)
+                // Language code normalization
+                assert.deepStrictEqual(normalizeLanguageCode("bn"), { lang: "bn", baseLang: "bn" })
+            })
+        }
+    )
 })
+

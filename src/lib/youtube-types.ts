@@ -36,6 +36,7 @@ export interface NormalizedTranscript {
     videoId: string
     lang: string
     source: "native" | "ai"
+    provider?: "extract-youtube" | "supadata" | "supadata-ai"
     segments: TranscriptSegment[]
     fullText: string
     duration: number // total duration in seconds
@@ -81,6 +82,14 @@ export interface Citation {
     quote?: string
 }
 
+export interface YoutubeDiagnosticEvent {
+    event: string
+    requestId: string
+    provider: string
+    failureCategory: string
+    message: string
+}
+
 export interface YoutubeProgressEvent {
     videoId: string
     status: YoutubeVideoStatus
@@ -93,6 +102,7 @@ export interface YoutubeProgressEvent {
     timestamp: number
     chunksIndexed?: number
     totalChunks?: number
+    diagnostic?: YoutubeDiagnosticEvent
 }
 
 export interface YoutubeInitRequest {

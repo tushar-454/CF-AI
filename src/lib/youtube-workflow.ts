@@ -13,12 +13,8 @@ import {
     saveYoutubeChunks,
     updateYoutubeVideoProgress,
 } from "./db"
-import {
-    fetchNativeCaptions,
-    pollAiTranscriptionJob,
-    startAiTranscription,
-    SupadataError,
-} from "./supadata"
+import { SupadataError } from "./supadata"
+import { extractYouTubeTranscript } from "./youtube-extractor"
 import type { AppEnv, VectorizeIndexBinding } from "./types"
 import { chunkTranscriptSegments } from "./youtube-chunker"
 import { YOUTUBE_CHAT_CONFIG } from "./youtube-model-config"
@@ -28,7 +24,6 @@ import {
     verifyYoutubeIndexingComplete,
 } from "./youtube-rag"
 import type {
-    NormalizedTranscript,
     YoutubeChunk,
     YoutubeProgressEvent,
     YoutubeVideoItem,
@@ -162,60 +157,40 @@ export class YoutubeProcessingWorkflow extends WorkflowEntrypoint<AppEnv, Youtub
 
             const workflowTargetLang = cacheCheck.targetLang || "en"
 
-            // Step 2: Transcript retrieval (native captions first; AI transcription if confirmed)
+            // Step 2: Transcript retrieval (primary: extract-youtube, fallback: supadata native, confirmation: supadata AI)
             const transcriptResult = await step.do("extract-transcript", async () => {
-                const apiKey = this.env.SUPADATA_API_KEY
-                if (!apiKey) {
-                    throw new SupadataError(
-                        "SUPADATA_API_KEY is not configured in server secrets.",
-                        "MISSING_API_KEY",
-                        500,
-                        false
-                    )
-                }
-
                 await report("extracting", 20, "Extracting captions from YouTube...")
 
-                if (!forceAiTranscription) {
-                    // Priority 1: Native YouTube captions
-                    const nativeResult = await fetchNativeCaptions(videoId, apiKey, {
-                        lang: workflowTargetLang,
-                    })
-                    if (nativeResult.found) {
-                        return { transcript: nativeResult.transcript, needsConfirmation: false }
-                    }
+                const extractionResult = await extractYouTubeTranscript(videoId, this.env, {
+                    lang: workflowTargetLang,
+                    forceAiTranscription,
+                    transcriptApi: event.payload.transcriptApi,
+                })
 
-                    // Native captions unavailable: prompt for explicit confirmation
+                if (extractionResult.needsConfirmation || !extractionResult.transcript) {
                     await report(
                         "awaiting_confirmation",
                         25,
-                        "No native captions found. AI speech-to-text transcription is available with user confirmation.",
-                        { needsConfirmation: true }
+                        extractionResult.message ||
+                            "No native captions found. AI speech-to-text transcription is available with user confirmation.",
+                        {
+                            needsConfirmation: true,
+                            diagnostic: extractionResult.diagnostic,
+                        }
                     )
                     return { transcript: null, needsConfirmation: true }
                 }
 
-                // User has explicitly confirmed AI transcription
-                await report("extracting", 30, "Generating AI transcription for video audio...")
-                const startResult = await startAiTranscription(videoId, apiKey, {
-                    lang: workflowTargetLang,
-                })
-
-                let finalTranscript: NormalizedTranscript
-                if (startResult.transcript) {
-                    finalTranscript = startResult.transcript
-                } else if (startResult.jobId) {
-                    finalTranscript = await pollAiTranscriptionJob(
-                        startResult.jobId,
-                        videoId,
-                        apiKey,
-                        { lang: workflowTargetLang }
+                if (extractionResult.diagnostic) {
+                    await report(
+                        "extracting",
+                        30,
+                        extractionResult.diagnostic.message,
+                        { diagnostic: extractionResult.diagnostic }
                     )
-                } else {
-                    throw new Error("Supadata returned neither transcript nor jobId.")
                 }
 
-                return { transcript: finalTranscript, needsConfirmation: false }
+                return { transcript: extractionResult.transcript, needsConfirmation: false }
             })
 
             if (transcriptResult.needsConfirmation || !transcriptResult.transcript) {

@@ -69,6 +69,7 @@ export interface DocumentProgressEvent {
     timestamp: number
     chunksIndexed?: number
     totalChunks?: number
+    diagnostic?: import("./youtube-types").YoutubeDiagnosticEvent
 }
 
 export interface DocumentItem {
@@ -241,6 +242,7 @@ export interface AppEnv {
     R2_PUBLIC_URL?: string
     CLOUDFLARE_ACCOUNT_ID?: string
     CLOUDFLARE_API_TOKEN?: string
+    DISABLE_TRANSCRIPT_FALLBACK?: string
 }
 
 export * from "./youtube-types"

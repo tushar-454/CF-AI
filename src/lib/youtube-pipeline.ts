@@ -11,12 +11,8 @@ import {
     saveYoutubeChunks,
     updateYoutubeVideoProgress,
 } from "./db"
-import {
-    fetchNativeCaptions,
-    pollAiTranscriptionJob,
-    startAiTranscription,
-    SupadataError,
-} from "./supadata"
+import { SupadataError } from "./supadata"
+import { extractYouTubeTranscript } from "./youtube-extractor"
 import type {
     AppEnv,
     DocumentProgressEvent,
@@ -31,8 +27,8 @@ import {
     persistYoutubeR2Artifacts,
     verifyYoutubeIndexingComplete,
 } from "./youtube-rag"
+import type { Transcript, TranscriptList } from "extract-youtube"
 import type {
-    NormalizedTranscript,
     YoutubeChunk,
     YoutubeProgressEvent,
     YoutubeVideoItem,
@@ -47,6 +43,9 @@ export interface YoutubeWorkflowParams {
     url: string
     forceAiTranscription?: boolean
     title?: string
+    transcriptApi?: {
+        listTranscripts(videoId: string): Promise<TranscriptList | Iterable<Transcript>>
+    }
 }
 
 export async function publishVideoProgress(
@@ -77,6 +76,7 @@ export async function publishVideoProgress(
             timestamp: event.timestamp,
             chunksIndexed: event.chunksIndexed,
             totalChunks: event.totalChunks,
+            diagnostic: event.diagnostic,
         }
 
         if (typeof stub.reportProgress === "function") {
@@ -189,55 +189,39 @@ export async function executeYoutubePipeline(
             await updateYoutubeVideoProgress(videoId, { title: detected.title }, env.DB)
         }
 
-        // Step 2: Transcript retrieval
-        const apiKey = env.SUPADATA_API_KEY
-        if (!apiKey) {
-            throw new SupadataError(
-                "SUPADATA_API_KEY is not configured in server secrets.",
-                "MISSING_API_KEY",
-                500,
-                false
+        // Step 2: Transcript retrieval (primary: extract-youtube, fallback: supadata native, confirmation: supadata AI)
+        await report("extracting", 20, "Extracting captions from YouTube...")
+
+        const extractionResult = await extractYouTubeTranscript(videoId, env, {
+            lang: targetLang,
+            forceAiTranscription,
+            transcriptApi: params.transcriptApi,
+        })
+
+        if (extractionResult.needsConfirmation || !extractionResult.transcript) {
+            await report(
+                "awaiting_confirmation",
+                25,
+                extractionResult.message ||
+                    "No native captions found. AI speech-to-text transcription is available with user confirmation.",
+                {
+                    needsConfirmation: true,
+                    diagnostic: extractionResult.diagnostic,
+                }
+            )
+            return { success: false, awaitingConfirmation: true }
+        }
+
+        if (extractionResult.diagnostic) {
+            await report(
+                "extracting",
+                30,
+                extractionResult.diagnostic.message,
+                { diagnostic: extractionResult.diagnostic }
             )
         }
 
-        await report("extracting", 20, "Extracting captions from YouTube...")
-
-        let normalizedTranscript: NormalizedTranscript | null = null
-
-        if (!forceAiTranscription) {
-            const nativeResult = await fetchNativeCaptions(videoId, apiKey, { lang: targetLang })
-            if (nativeResult.found) {
-                normalizedTranscript = nativeResult.transcript
-            } else {
-                await report(
-                    "awaiting_confirmation",
-                    25,
-                    "No native captions found. AI speech-to-text transcription is available with user confirmation.",
-                    { needsConfirmation: true }
-                )
-                return { success: false, awaitingConfirmation: true }
-            }
-        } else {
-            await report("extracting", 30, "Generating AI transcription for video audio...")
-            const startResult = await startAiTranscription(videoId, apiKey, { lang: targetLang })
-
-            if (startResult.transcript) {
-                normalizedTranscript = startResult.transcript
-            } else if (startResult.jobId) {
-                normalizedTranscript = await pollAiTranscriptionJob(
-                    startResult.jobId,
-                    videoId,
-                    apiKey,
-                    { lang: targetLang }
-                )
-            } else {
-                throw new Error("Supadata returned neither transcript nor jobId.")
-            }
-        }
-
-        if (!normalizedTranscript) {
-            return { success: false, awaitingConfirmation: true }
-        }
+        const normalizedTranscript = extractionResult.transcript
 
         // Step 3: Chunking & artifact persistence
         await report("chunking", 50, "Generating semantic timestamped chunks...")
