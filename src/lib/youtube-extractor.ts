@@ -1,22 +1,10 @@
 /**
- * Primary YouTube caption extractor using `extract-youtube` with deterministic
- * fallback to Supadata native captions and explicit user-confirmed AI transcription.
+ * Primary YouTube subtitle extractor using ScrapingBee's official YouTube Subtitles API
+ * (/api/v1/youtube/subtitles). ScrapingBee is the sole transcript provider; all Supadata
+ * calls and fallback paths are completely disabled.
  * Fully instrumented with structured diagnostics and failure classification.
  */
 
-import {
-    YouTubeTranscriptApi,
-    type FetchedTranscriptSnippet,
-    type HttpClient,
-    type TranscriptList,
-    type Transcript,
-} from "extract-youtube"
-import {
-    fetchNativeCaptions,
-    startAiTranscription,
-    pollAiTranscriptionJob,
-    SupadataError,
-} from "./supadata"
 import type { AppEnv } from "./types"
 import type {
     NormalizedTranscript,
@@ -34,23 +22,66 @@ import {
     type YoutubeFailureCategory,
 } from "./youtube-diagnostics"
 
-export interface ExtractYoutubeOptions {
+export class ScrapingBeeError extends Error {
+    readonly statusCode?: number
+    readonly isRetryable: boolean
+    readonly failureCategory?: YoutubeFailureCategory
+
+    constructor(
+        message: string,
+        statusCode?: number,
+        isRetryable: boolean = false,
+        failureCategory?: YoutubeFailureCategory
+    ) {
+        super(message)
+        this.name = "ScrapingBeeError"
+        this.statusCode = statusCode
+        this.isRetryable = isRetryable
+        this.failureCategory = failureCategory
+    }
+}
+
+export interface ScrapingBeeSubtitleCue {
+    text?: string
+    start?: number | string
+    duration?: number | string
+    start_ms?: number | string
+    d_duration_ms?: number | string
+    duration_ms?: number | string
+    snippet?: {
+        runs?: Array<{ text?: string }>
+        text?: string
+    }
+}
+
+export interface ScrapingBeeSubtitlesResponse {
+    video_id?: string
+    language?: string
+    subtitle_origin?: string
+    subtitles?:
+        | ScrapingBeeSubtitleCue[]
+        | Record<string, Record<string, ScrapingBeeSubtitleCue[]>>
+        | unknown
+}
+
+export interface ScrapingBeeSubtitlesOptions {
     lang?: string
     signal?: AbortSignal
     timeoutMs?: number
     requestId?: string
     attempt?: number
+    subtitleOrigin?: "auto_generated" | "uploader_provided" | "auto" | "manual"
+    fetchFn?: typeof fetch
     disableFallback?: boolean
     playerResponse?: {
         playabilityStatus?: string
         playabilityReason?: string
     }
-    transcriptApi?: {
-        listTranscripts(videoId: string): Promise<TranscriptList | Iterable<Transcript>>
-    }
 }
 
-export type ExtractYoutubeFailureReason =
+export type ExtractYoutubeOptions = ScrapingBeeSubtitlesOptions
+
+export type ScrapingBeeFailureReason =
     | YoutubeFailureCategory
     | "no_captions"
     | "blocked"
@@ -60,18 +91,20 @@ export type ExtractYoutubeFailureReason =
     | "malformed"
     | "error"
 
-export type ExtractYoutubeResult =
+export type ExtractYoutubeFailureReason = ScrapingBeeFailureReason
+
+export type ScrapingBeeResult =
     | {
           found: true
           transcript: NormalizedTranscript
           isGenerated: boolean
           languageCode: string
-          provider: "extract-youtube"
+          provider: "scrapingbee"
           requestId: string
       }
     | {
           found: false
-          reason: ExtractYoutubeFailureReason
+          reason: ScrapingBeeFailureReason
           failureCategory: YoutubeFailureCategory
           message: string
           isRetryable: boolean
@@ -82,168 +115,75 @@ export type ExtractYoutubeResult =
           playabilityReason?: string
       }
 
+export type ExtractYoutubeResult = ScrapingBeeResult
+
 export type ExtractTranscriptPipelineResult =
     | {
           transcript: NormalizedTranscript
-          provider: "extract-youtube" | "supadata" | "supadata-ai"
+          provider: "scrapingbee"
           needsConfirmation: false
+          message?: string
           diagnostic?: YoutubeDiagnosticEvent
       }
     | {
           transcript: null
           provider: null
-          needsConfirmation: true
+          needsConfirmation: boolean
           message: string
           diagnostic?: YoutubeDiagnosticEvent
       }
 
 /**
- * Creates an instrumented fetch-based HTTP client for Cloudflare Workers and standard environments.
- * Observes underlying requests and responses (`extract_youtube.request_started` and
- * `extract_youtube.response_received`) with accurate timing and status codes.
+ * Normalizes raw subtitle cues from ScrapingBee into canonical TranscriptSegments.
+ * Resilient to flat objects ({ text, start, duration }), ms objects ({ start_ms, d_duration_ms }),
+ * and snippet runs ({ snippet: { runs: [{ text }] } }).
  */
-export function createWorkersHttpClient(
-    signal?: AbortSignal,
-    timeoutMs: number = 8000,
-    context?: {
-        requestId?: string
-        videoId?: string
-        attempt?: number
-        playerResponse?: {
-            playabilityStatus?: string
-            playabilityReason?: string
-        }
-    }
-): HttpClient {
-    const requestId = context?.requestId || generateCorrelationId()
-    const videoId = context?.videoId
-    const attempt = context?.attempt || 1
-    const runtime = detectExecutionRuntime()
-
-    const makeRequest = async (
-        method: "GET" | "POST",
-        url: string,
-        options?: RequestInit
-    ): Promise<Response> => {
-        logDiagnostic({
-            event: "extract_youtube.request_started",
-            requestId,
-            videoId,
-            provider: "extract-youtube",
-            attempt,
-            runtime,
-            urlTarget: url,
-        })
-
-        const startTime = Date.now()
-        const timeoutSignal = AbortSignal.timeout(timeoutMs)
-        const combinedSignal = signal
-            ? AbortSignal.any([signal, timeoutSignal, ...(options?.signal ? [options.signal] : [])])
-            : (options?.signal ? AbortSignal.any([timeoutSignal, options.signal]) : timeoutSignal)
-
-        const res = await fetch(url, {
-            ...options,
-            method,
-            signal: combinedSignal,
-            headers: {
-                "User-Agent":
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "en-US,en;q=0.9",
-                ...(options?.headers as Record<string, string>),
-            },
-        })
-
-        const durationMs = Date.now() - startTime
-
-        // Targeted diagnostics: inspect /youtubei/v1/player playabilityStatus on response
-        if (url.includes("/youtubei/v1/player")) {
-            try {
-                const cloned = res.clone()
-                const data = (await cloned.json()) as {
-                    playabilityStatus?: {
-                        status?: string
-                        reason?: string
-                        messages?: string[]
-                        errorScreen?: {
-                            playerErrorMessageRenderer?: {
-                                reason?: { runs?: Array<{ text?: string }> }
-                                subreason?: { runs?: Array<{ text?: string }> }
-                            }
-                        }
-                    }
-                }
-                if (data?.playabilityStatus && context) {
-                    if (!context.playerResponse) {
-                        context.playerResponse = {}
-                    }
-                    const status = data.playabilityStatus.status
-                    const reason =
-                        data.playabilityStatus.reason ||
-                        (Array.isArray(data.playabilityStatus.messages)
-                            ? data.playabilityStatus.messages[0]
-                            : undefined) ||
-                        data.playabilityStatus.errorScreen?.playerErrorMessageRenderer?.reason?.runs
-                            ?.map((r) => r.text)
-                            .filter(Boolean)
-                            .join("") ||
-                        data.playabilityStatus.errorScreen?.playerErrorMessageRenderer?.subreason?.runs
-                            ?.map((r) => r.text)
-                            .filter(Boolean)
-                            .join("")
-
-                    context.playerResponse.playabilityStatus = status
-                    context.playerResponse.playabilityReason = reason
-                }
-            } catch {
-                // Ignore clone parsing errors to preserve stream
-            }
-        }
-
-        logDiagnostic({
-            event: "extract_youtube.response_received",
-            requestId,
-            videoId,
-            provider: "extract-youtube",
-            attempt,
-            runtime,
-            durationMs,
-            httpStatus: res.status,
-            success: res.ok,
-            urlTarget: url,
-        })
-
-        return res
-    }
-
-    return {
-        get(url: string, options?: RequestInit): Promise<Response> {
-            return makeRequest("GET", url, options)
-        },
-        post(url: string, options?: RequestInit): Promise<Response> {
-            return makeRequest("POST", url, options)
-        },
-    }
-}
-
-/**
- * Normalizes raw snippets from `extract-youtube` (seconds) into canonical TranscriptSegments.
- */
-export function normalizeExtractYoutubeSnippets(
-    snippets: FetchedTranscriptSnippet[],
+export function normalizeScrapingBeeSubtitles(
+    rawSubtitles: ScrapingBeeSubtitleCue[] | null | undefined,
     videoId: string,
     lang: string = "en",
     version: number = 1
 ): NormalizedTranscript {
     const segments: TranscriptSegment[] = []
     let maxEndSeconds = 0
+    const list = Array.isArray(rawSubtitles) ? rawSubtitles : []
 
-    for (let i = 0; i < snippets.length; i++) {
-        const item = snippets[i]
-        const text = (item.text || "").replace(/\s+/g, " ").trim()
+    for (let i = 0; i < list.length; i++) {
+        const item = list[i]
+        if (!item || typeof item !== "object") continue
+
+        let rawText = item.text || ""
+        if (!rawText && item.snippet) {
+            if (Array.isArray(item.snippet.runs)) {
+                rawText = item.snippet.runs
+                    .map((r) => (r && typeof r === "object" ? String(r.text || "") : ""))
+                    .join("")
+            } else if (typeof item.snippet.text === "string") {
+                rawText = item.snippet.text
+            }
+        }
+
+        const text = rawText
+            .replace(/\r\n|\r|\n/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
         if (!text) continue
 
-        const startSeconds = Math.max(0, Number(item.start || 0))
-        const durationSeconds = Math.max(0.1, Number(item.duration || 0))
+        let startVal = item.start
+        if (startVal === undefined && item.start_ms !== undefined) {
+            startVal = Number(item.start_ms) / 1000
+        }
+        let durationVal = item.duration
+        if (durationVal === undefined) {
+            if (item.d_duration_ms !== undefined) {
+                durationVal = Number(item.d_duration_ms) / 1000
+            } else if (item.duration_ms !== undefined) {
+                durationVal = Number(item.duration_ms) / 1000
+            }
+        }
+
+        const startSeconds = Math.max(0, Number(startVal || 0))
+        const durationSeconds = Math.max(0.1, Number(durationVal || 0))
         const endSeconds = startSeconds + durationSeconds
 
         if (endSeconds > maxEndSeconds) {
@@ -265,7 +205,7 @@ export function normalizeExtractYoutubeSnippets(
         videoId,
         lang,
         source: "native",
-        provider: "extract-youtube",
+        provider: "scrapingbee",
         segments,
         fullText,
         duration: Math.ceil(maxEndSeconds),
@@ -274,98 +214,222 @@ export function normalizeExtractYoutubeSnippets(
 }
 
 /**
- * Prioritizes transcript tracks based on user/audio language and creator vs auto-generated status.
+ * Backward-compatible alias for existing tests and modules.
  */
-export function selectBestTranscriptTrack<T extends { languageCode: string; isGenerated: boolean }>(
-    tracks: T[],
-    targetLang?: string
-): T | null {
-    if (!tracks || tracks.length === 0) return null
+export const normalizeExtractYoutubeSnippets = normalizeScrapingBeeSubtitles
 
-    const cleanLang = (targetLang || "").trim().toLowerCase()
-    const baseLang = cleanLang.split("-")[0].split("_")[0]
+/**
+ * Parses and normalizes ScrapingBee YouTube Subtitles API responses.
+ * Handles:
+ * 1. Real ScrapingBee nested schema: { subtitles: { uploader_provided: { [lang]: [...] }, auto_generated: { [lang]: [...] } } }
+ * 2. Flat subtitle cue arrays: [{ text, start, duration }]
+ * 3. Wrapped array responses: { subtitles: [{ text, start, duration }], language?: string, subtitle_origin?: string }
+ */
+export function parseScrapingBeeSubtitles(
+    data: unknown,
+    options: ScrapingBeeSubtitlesOptions = {}
+): {
+    cues: ScrapingBeeSubtitleCue[] | null
+    language: string
+    isGenerated: boolean
+    origin: string
+} {
+    const targetLang = (options.lang || "en").toLowerCase()
+    const targetBase = targetLang.split("-")[0].split("_")[0]
 
-    if (cleanLang) {
-        // 1. Exact match manual
-        const exactManual = tracks.find(
-            (t) => !t.isGenerated && t.languageCode.toLowerCase() === cleanLang
-        )
-        if (exactManual) return exactManual
-
-        // 2. Base match manual
-        const baseManual = tracks.find(
-            (t) =>
-                !t.isGenerated &&
-                (t.languageCode.toLowerCase() === baseLang ||
-                    t.languageCode.toLowerCase().startsWith(`${baseLang}-`) ||
-                    t.languageCode.toLowerCase().startsWith(`${baseLang}_`))
-        )
-        if (baseManual) return baseManual
-
-        // 3. Exact match auto-generated
-        const exactGen = tracks.find(
-            (t) => t.isGenerated && t.languageCode.toLowerCase() === cleanLang
-        )
-        if (exactGen) return exactGen
-
-        // 4. Base match auto-generated
-        const baseGen = tracks.find(
-            (t) =>
-                t.isGenerated &&
-                (t.languageCode.toLowerCase() === baseLang ||
-                    t.languageCode.toLowerCase().startsWith(`${baseLang}-`) ||
-                    t.languageCode.toLowerCase().startsWith(`${baseLang}_`))
-        )
-        if (baseGen) return baseGen
+    if (!data) {
+        return { cues: null, language: targetLang, isGenerated: false, origin: "unknown" }
     }
 
-    // 5. English manual
-    const enManual = tracks.find(
-        (t) => !t.isGenerated && t.languageCode.toLowerCase().startsWith("en")
-    )
-    if (enManual) return enManual
+    // Case 1: Raw array of subtitle cues
+    if (Array.isArray(data)) {
+        const cues = normalizeCueList(data)
+        return {
+            cues,
+            language: targetLang,
+            isGenerated: false,
+            origin: "unknown",
+        }
+    }
 
-    // 6. English generated
-    const enGen = tracks.find(
-        (t) => t.isGenerated && t.languageCode.toLowerCase().startsWith("en")
-    )
-    if (enGen) return enGen
+    if (typeof data !== "object") {
+        return { cues: null, language: targetLang, isGenerated: false, origin: "unknown" }
+    }
 
-    // 7. First manual track in any language
-    const anyManual = tracks.find((t) => !t.isGenerated)
-    if (anyManual) return anyManual
+    const payload = data as Record<string, unknown>
+    const rawSubtitles = payload.subtitles
 
-    // 8. First available track
-    return tracks[0] || null
+    // Case 2: Wrapped array of cues: { subtitles: [ ... ] }
+    if (Array.isArray(rawSubtitles)) {
+        const cues = normalizeCueList(rawSubtitles)
+        const responseLang =
+            (typeof payload.language === "string" && payload.language) || options.lang || "en"
+        const isGen = payload.subtitle_origin === "auto_generated"
+        return {
+            cues,
+            language: responseLang,
+            isGenerated: isGen,
+            origin:
+                (payload.subtitle_origin as string) ||
+                (isGen ? "auto_generated" : "uploader_provided"),
+        }
+    }
+
+    // Case 3: Nested object: { subtitles: { uploader_provided: { en: [...] }, auto_generated: { en: [...] } } }
+    if (rawSubtitles && typeof rawSubtitles === "object") {
+        const subtitlesRecord = rawSubtitles as Record<string, unknown>
+
+        const originOrder: string[] =
+            options.subtitleOrigin === "auto_generated"
+                ? ["auto_generated", "uploader_provided"]
+                : options.subtitleOrigin === "uploader_provided"
+                  ? ["uploader_provided", "auto_generated"]
+                  : ["uploader_provided", "auto_generated"]
+
+        const allOrigins = Array.from(new Set([...originOrder, ...Object.keys(subtitlesRecord)]))
+
+        // Strategy A: Find target language matching exact or base code in preferred origins
+        for (const origin of allOrigins) {
+            const originObj = subtitlesRecord[origin]
+            if (!originObj || typeof originObj !== "object" || Array.isArray(originObj)) continue
+
+            const originRecord = originObj as Record<string, unknown>
+            const matchedKey = findMatchingLanguageKey(originRecord, targetLang, targetBase)
+            if (matchedKey && Array.isArray(originRecord[matchedKey])) {
+                const cues = normalizeCueList(originRecord[matchedKey] as unknown[])
+                return {
+                    cues,
+                    language: matchedKey,
+                    isGenerated: origin === "auto_generated",
+                    origin,
+                }
+            }
+        }
+
+        // Strategy B: If target language not found, take the first available language from preferred origins
+        for (const origin of allOrigins) {
+            const originObj = subtitlesRecord[origin]
+            if (!originObj || typeof originObj !== "object" || Array.isArray(originObj)) continue
+
+            const originRecord = originObj as Record<string, unknown>
+            const availableKeys = Object.keys(originRecord)
+            if (availableKeys.length > 0) {
+                const firstKey = availableKeys[0]
+                if (Array.isArray(originRecord[firstKey])) {
+                    const cues = normalizeCueList(originRecord[firstKey] as unknown[])
+                    return {
+                        cues,
+                        language: firstKey,
+                        isGenerated: origin === "auto_generated",
+                        origin,
+                    }
+                }
+            }
+        }
+    }
+
+    return { cues: null, language: targetLang, isGenerated: false, origin: "unknown" }
+}
+
+function findMatchingLanguageKey(
+    obj: Record<string, unknown>,
+    targetLang: string,
+    targetBase: string
+): string | null {
+    const keys = Object.keys(obj)
+    // 1. Exact case-insensitive match
+    const exact = keys.find((k) => k.toLowerCase() === targetLang)
+    if (exact) return exact
+    // 2. Base code match (e.g. "en" matches "en-US", or "en-US" matches "en")
+    const baseMatch = keys.find((k) => k.toLowerCase().split("-")[0].split("_")[0] === targetBase)
+    if (baseMatch) return baseMatch
+    return null
+}
+
+function normalizeCueList(rawList: unknown[]): ScrapingBeeSubtitleCue[] {
+    const normalized: ScrapingBeeSubtitleCue[] = []
+    for (const item of rawList) {
+        if (!item || typeof item !== "object") continue
+        const cue = item as Record<string, unknown>
+
+        let text = ""
+        if (cue.snippet && typeof cue.snippet === "object") {
+            const snippet = cue.snippet as Record<string, unknown>
+            if (Array.isArray(snippet.runs)) {
+                text = snippet.runs
+                    .map((r) =>
+                        r && typeof r === "object"
+                            ? String((r as Record<string, unknown>).text || "")
+                            : ""
+                    )
+                    .join("")
+            } else if (typeof snippet.text === "string") {
+                text = snippet.text
+            }
+        } else if (typeof cue.text === "string") {
+            text = cue.text
+        }
+
+        const cleanText = text.replace(/\r\n|\r|\n/g, " ").trim()
+        if (!cleanText) continue
+
+        let start = 0
+        if (cue.start_ms !== undefined) {
+            start = Number(cue.start_ms) / 1000
+        } else if (cue.start !== undefined) {
+            start = Number(cue.start)
+        }
+
+        let duration = 0
+        if (cue.d_duration_ms !== undefined) {
+            duration = Number(cue.d_duration_ms) / 1000
+        } else if (cue.duration_ms !== undefined) {
+            duration = Number(cue.duration_ms) / 1000
+        } else if (cue.duration !== undefined) {
+            duration = Number(cue.duration)
+        }
+
+        if (Number.isNaN(start) || Number.isNaN(duration) || start < 0 || duration < 0) {
+            continue
+        }
+
+        normalized.push({
+            text: cleanText,
+            start: Number(start.toFixed(2)),
+            duration: Number(duration.toFixed(2)),
+        })
+    }
+    return normalized
 }
 
 /**
- * Attempts to retrieve existing platform captions using the primary provider `extract-youtube`.
- * Fully instrumented with structured diagnostics covering each step of extraction.
+ * Fetches subtitles for a YouTube video using ScrapingBee's official YouTube Subtitles API endpoint.
+ * Authenticates via Authorization: Bearer <API_KEY> header. Never exposes API key in URL or logs.
  */
-export async function fetchCaptionsFromExtractYoutube(
+export async function fetchSubtitlesFromScrapingBee(
     videoId: string,
-    options: ExtractYoutubeOptions = {}
-): Promise<ExtractYoutubeResult> {
+    apiKey: string,
+    options: ScrapingBeeSubtitlesOptions = {}
+): Promise<ScrapingBeeResult> {
     const requestId = options.requestId || generateCorrelationId()
     const runtime = detectExecutionRuntime()
     const attempt = options.attempt || 1
 
     logDiagnostic({
-        event: "extract_youtube.started",
+        event: "scrapingbee.started",
         requestId,
         videoId,
-        provider: "extract-youtube",
+        provider: "scrapingbee",
         attempt,
         runtime,
     })
 
     if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
         logDiagnostic({
-            event: "extract_youtube.failed",
+            event: "scrapingbee.failed",
             requestId,
             videoId,
-            provider: "extract-youtube",
+            provider: "scrapingbee",
             attempt,
             runtime,
             success: false,
@@ -384,234 +448,307 @@ export async function fetchCaptionsFromExtractYoutube(
     }
 
     logDiagnostic({
-        event: "extract_youtube.video_id_validated",
+        event: "scrapingbee.video_id_validated",
         requestId,
         videoId,
-        provider: "extract-youtube",
+        provider: "scrapingbee",
         attempt,
         runtime,
     })
 
-    const startTime = Date.now()
-    const playerResponse = options.playerResponse || {}
-    const context = {
-        requestId,
-        videoId,
-        attempt,
-        playerResponse,
+    if (!apiKey || !apiKey.trim()) {
+        logDiagnostic({
+            event: "scrapingbee.failed",
+            requestId,
+            videoId,
+            provider: "scrapingbee",
+            attempt,
+            runtime,
+            success: false,
+            failureCategory: "http_error",
+            errorMessage: "SCRAPINGBEE_API_KEY is not configured in server secrets.",
+            durationMs: 0,
+        })
+        return {
+            found: false,
+            reason: "http_error",
+            failureCategory: "http_error",
+            message: "SCRAPINGBEE_API_KEY is not configured in server secrets.",
+            isRetryable: false,
+            requestId,
+            httpStatus: 500,
+        }
     }
 
+    const startTime = Date.now()
+    const timeoutMs = options.timeoutMs || YOUTUBE_CHAT_CONFIG.requestTimeoutMs || 15000
+
     try {
-        const timeoutMs = options.timeoutMs || YOUTUBE_CHAT_CONFIG.requestTimeoutMs || 8000
-        const httpClient = createWorkersHttpClient(options.signal, timeoutMs, context)
-        const api = options.transcriptApi || new YouTubeTranscriptApi({ httpClient })
-
-        const transcriptList = await api.listTranscripts(videoId)
-        const allTracks: Transcript[] = Array.from(transcriptList)
-
-        if (allTracks.length === 0) {
-            const durationMs = Date.now() - startTime
-            logDiagnostic({
-                event: "extract_youtube.failed",
-                requestId,
-                videoId,
-                provider: "extract-youtube",
-                attempt,
-                runtime,
-                success: false,
-                failureCategory: "captions_unavailable",
-                errorMessage: "No caption tracks listed for this video.",
-                durationMs,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            })
-            return {
-                found: false,
-                reason: "captions_unavailable",
-                failureCategory: "captions_unavailable",
-                message: "No caption tracks listed for this video.",
-                isRetryable: false,
-                requestId,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            }
+        const endpoint = new URL(YOUTUBE_CHAT_CONFIG.scrapingbeeBaseUrl)
+        endpoint.searchParams.set("video_id", videoId)
+        if (options.lang) {
+            endpoint.searchParams.set("language", options.lang)
+        }
+        if (options.subtitleOrigin) {
+            endpoint.searchParams.set("subtitle_origin", options.subtitleOrigin)
         }
 
-        const selectedTrack = selectBestTranscriptTrack(allTracks, options.lang)
-        if (!selectedTrack) {
-            const durationMs = Date.now() - startTime
-            logDiagnostic({
-                event: "extract_youtube.failed",
-                requestId,
-                videoId,
-                provider: "extract-youtube",
-                attempt,
-                runtime,
-                success: false,
-                failureCategory: "captions_unavailable",
-                errorMessage: "No suitable caption track found.",
-                durationMs,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            })
-            return {
-                found: false,
-                reason: "captions_unavailable",
-                failureCategory: "captions_unavailable",
-                message: "No suitable caption track found.",
-                isRetryable: false,
-                requestId,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            }
-        }
+        const timeoutSignal = AbortSignal.timeout(timeoutMs)
+        const combinedSignal = options.signal
+            ? AbortSignal.any([options.signal, timeoutSignal])
+            : timeoutSignal
 
-        const fetched = await selectedTrack.fetch()
-
-        // Validate snippet cue content and timestamps
-        const validation = validateTranscriptSnippets(fetched?.snippets)
-        if (!validation.valid) {
-            const durationMs = Date.now() - startTime
-            const category = validation.failureCategory || "empty_transcript"
-            logDiagnostic({
-                event: "extract_youtube.transcript_validation_failed",
-                requestId,
-                videoId,
-                provider: "extract-youtube",
-                attempt,
-                runtime,
-                failureCategory: category,
-                errorMessage: validation.reason,
-                captionCount: validation.count,
-                durationMs,
-            })
-            logDiagnostic({
-                event: "extract_youtube.failed",
-                requestId,
-                videoId,
-                provider: "extract-youtube",
-                attempt,
-                runtime,
-                success: false,
-                failureCategory: category,
-                errorMessage: validation.reason,
-                durationMs,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            })
-            return {
-                found: false,
-                reason: category,
-                failureCategory: category,
-                message: validation.reason || "Caption track contained no valid text cues.",
-                isRetryable: false,
-                requestId,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            }
-        }
-
-        const normalized = normalizeExtractYoutubeSnippets(
-            fetched.snippets,
+        logDiagnostic({
+            event: "scrapingbee.request_started",
+            requestId,
             videoId,
-            fetched.languageCode || selectedTrack.languageCode || options.lang || "en"
-        )
+            provider: "scrapingbee",
+            attempt,
+            runtime,
+            urlTarget: endpoint.toString(),
+        })
 
-        if (normalized.segments.length === 0) {
-            const durationMs = Date.now() - startTime
-            logDiagnostic({
-                event: "extract_youtube.transcript_validation_failed",
-                requestId,
-                videoId,
-                provider: "extract-youtube",
-                attempt,
-                runtime,
-                failureCategory: "empty_transcript",
-                errorMessage: "Caption snippets contained no readable text.",
-                captionCount: 0,
-                durationMs,
-            })
-            logDiagnostic({
-                event: "extract_youtube.failed",
-                requestId,
-                videoId,
-                provider: "extract-youtube",
-                attempt,
-                runtime,
-                success: false,
-                failureCategory: "empty_transcript",
-                errorMessage: "Caption snippets contained no readable text.",
-                durationMs,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            })
-            return {
-                found: false,
-                reason: "empty_transcript",
-                failureCategory: "empty_transcript",
-                message: "Caption snippets contained no readable text.",
-                isRetryable: false,
-                requestId,
-                playabilityStatus: context.playerResponse?.playabilityStatus,
-                playabilityReason: context.playerResponse?.playabilityReason,
-            }
-        }
+        const fetcher = options.fetchFn || globalThis.fetch
+        const res = await fetcher(endpoint.toString(), {
+            method: "GET",
+            headers: {
+                Authorization: `Bearer ${apiKey.trim()}`,
+                Accept: "application/json",
+            },
+            signal: combinedSignal,
+        })
 
         const durationMs = Date.now() - startTime
 
         logDiagnostic({
-            event: "extract_youtube.transcript_received",
+            event: "scrapingbee.response_received",
             requestId,
             videoId,
-            provider: "extract-youtube",
+            provider: "scrapingbee",
             attempt,
             runtime,
-            captionCount: normalized.segments.length,
-            totalCharacters: normalized.fullText.length,
-            language: normalized.lang,
             durationMs,
+            httpStatus: res.status,
+            success: res.ok,
+            urlTarget: endpoint.toString(),
         })
 
+        if (res.status === 200) {
+            const data = (await res.json()) as unknown
+            const parsed = parseScrapingBeeSubtitles(data, options)
+
+            const validation = validateTranscriptSnippets(parsed.cues)
+            if (!parsed.cues || !validation.valid) {
+                const category = validation.failureCategory || "empty_transcript"
+                logDiagnostic({
+                    event: "scrapingbee.transcript_validation_failed",
+                    requestId,
+                    videoId,
+                    provider: "scrapingbee",
+                    attempt,
+                    runtime,
+                    failureCategory: category,
+                    errorMessage: validation.reason,
+                    captionCount: validation.count,
+                    durationMs,
+                })
+                logDiagnostic({
+                    event: "scrapingbee.failed",
+                    requestId,
+                    videoId,
+                    provider: "scrapingbee",
+                    attempt,
+                    runtime,
+                    success: false,
+                    failureCategory: category,
+                    errorMessage: validation.reason,
+                    durationMs,
+                })
+                return {
+                    found: false,
+                    reason: category,
+                    failureCategory: category,
+                    message: validation.reason || "Subtitles contained no readable text cues.",
+                    isRetryable: false,
+                    requestId,
+                }
+            }
+
+            const normalized = normalizeScrapingBeeSubtitles(parsed.cues, videoId, parsed.language)
+
+            logDiagnostic({
+                event: "scrapingbee.transcript_received",
+                requestId,
+                videoId,
+                provider: "scrapingbee",
+                attempt,
+                runtime,
+                captionCount: normalized.segments.length,
+                totalCharacters: normalized.fullText.length,
+                language: normalized.lang,
+                durationMs,
+            })
+
+            logDiagnostic({
+                event: "scrapingbee.completed",
+                requestId,
+                videoId,
+                provider: "scrapingbee",
+                attempt,
+                runtime,
+                success: true,
+                captionCount: normalized.segments.length,
+                totalCharacters: normalized.fullText.length,
+                language: normalized.lang,
+                durationMs,
+            })
+
+            return {
+                found: true,
+                transcript: normalized,
+                isGenerated: parsed.isGenerated,
+                languageCode: normalized.lang,
+                provider: "scrapingbee",
+                requestId,
+            }
+        }
+
+        if (res.status === 404 || res.status === 204) {
+            logDiagnostic({
+                event: "scrapingbee.failed",
+                requestId,
+                videoId,
+                provider: "scrapingbee",
+                attempt,
+                runtime,
+                success: false,
+                failureCategory: "captions_unavailable",
+                errorMessage: "Captions are unavailable for this YouTube video.",
+                durationMs,
+                httpStatus: res.status,
+            })
+            return {
+                found: false,
+                reason: "captions_unavailable",
+                failureCategory: "captions_unavailable",
+                message: "Captions are unavailable for this YouTube video.",
+                isRetryable: false,
+                requestId,
+                httpStatus: res.status,
+            }
+        }
+
+        if (res.status === 401) {
+            logDiagnostic({
+                event: "scrapingbee.failed",
+                requestId,
+                videoId,
+                provider: "scrapingbee",
+                attempt,
+                runtime,
+                success: false,
+                failureCategory: "http_error",
+                errorMessage: "Invalid ScrapingBee API key or unauthorized request.",
+                durationMs,
+                httpStatus: 401,
+            })
+            return {
+                found: false,
+                reason: "http_error",
+                failureCategory: "http_error",
+                message: "Invalid ScrapingBee API key or unauthorized request.",
+                isRetryable: false,
+                requestId,
+                httpStatus: 401,
+            }
+        }
+
+        if (res.status === 403) {
+            logDiagnostic({
+                event: "scrapingbee.failed",
+                requestId,
+                videoId,
+                provider: "scrapingbee",
+                attempt,
+                runtime,
+                success: false,
+                failureCategory: "http_error",
+                errorMessage: "ScrapingBee account credits exhausted or feature forbidden.",
+                durationMs,
+                httpStatus: 403,
+            })
+            return {
+                found: false,
+                reason: "http_error",
+                failureCategory: "http_error",
+                message: "ScrapingBee account credits exhausted or feature forbidden.",
+                isRetryable: false,
+                requestId,
+                httpStatus: 403,
+            }
+        }
+
+        if (res.status === 429) {
+            logDiagnostic({
+                event: "scrapingbee.failed",
+                requestId,
+                videoId,
+                provider: "scrapingbee",
+                attempt,
+                runtime,
+                success: false,
+                failureCategory: "youtube_blocked_or_rate_limited",
+                errorMessage: "ScrapingBee rate limit or concurrency limit exceeded.",
+                durationMs,
+                httpStatus: 429,
+            })
+            return {
+                found: false,
+                reason: "youtube_blocked_or_rate_limited",
+                failureCategory: "youtube_blocked_or_rate_limited",
+                message: "ScrapingBee rate limit or concurrency limit exceeded.",
+                isRetryable: true,
+                requestId,
+                httpStatus: 429,
+            }
+        }
+
+        const errorBody = await res.text().catch(() => "")
+        const message = `ScrapingBee HTTP request failed with status ${res.status}${errorBody ? `: ${errorBody.slice(0, 100)}` : ""}.`
+        const isRetryable = res.status >= 500
+
         logDiagnostic({
-            event: "extract_youtube.completed",
+            event: "scrapingbee.failed",
             requestId,
             videoId,
-            provider: "extract-youtube",
+            provider: "scrapingbee",
             attempt,
             runtime,
-            success: true,
-            captionCount: normalized.segments.length,
-            totalCharacters: normalized.fullText.length,
-            language: normalized.lang,
+            success: false,
+            failureCategory: "http_error",
+            errorMessage: message,
             durationMs,
+            httpStatus: res.status,
         })
 
         return {
-            found: true,
-            transcript: normalized,
-            isGenerated: selectedTrack.isGenerated,
-            languageCode: normalized.lang,
-            provider: "extract-youtube",
+            found: false,
+            reason: "http_error",
+            failureCategory: "http_error",
+            message,
+            isRetryable,
             requestId,
+            httpStatus: res.status,
         }
     } catch (err: unknown) {
         const durationMs = Date.now() - startTime
-        const playabilityStatus = context.playerResponse?.playabilityStatus
-        const playabilityReason = context.playerResponse?.playabilityReason
-        const classified = classifyYoutubeError(err, {
-            videoId,
-            playabilityStatus,
-            playabilityReason,
-        })
-
-        const finalStatus = classified.playabilityStatus || playabilityStatus
-        const finalReason = classified.playabilityReason || playabilityReason
+        const classified = classifyYoutubeError(err, { videoId })
 
         logDiagnostic({
-            event: "extract_youtube.failed",
+            event: "scrapingbee.failed",
             requestId,
             videoId,
-            provider: "extract-youtube",
+            provider: "scrapingbee",
             attempt,
             runtime,
             success: false,
@@ -622,8 +759,6 @@ export async function fetchCaptionsFromExtractYoutube(
             errorCause: classified.errorCause,
             stack: classified.stack,
             failureCategory: classified.category,
-            playabilityStatus: finalStatus,
-            playabilityReason: finalReason,
             durationMs,
         })
 
@@ -636,254 +771,130 @@ export async function fetchCaptionsFromExtractYoutube(
             error: err,
             requestId,
             httpStatus: classified.httpStatus,
-            playabilityStatus: finalStatus,
-            playabilityReason: finalReason,
         }
     }
 }
 
 /**
- * Central orchestrator for transcript extraction with deterministic priority:
- * 1. Primary: `extract-youtube` (free, direct, zero credentials).
- * 2. Secondary fallback: Supadata native captions (uses existing client & credentials).
- * 3. AI transcription: Only after explicit user confirmation (`forceAiTranscription === true`).
- *
- * Emits correlated diagnostic logs across the provider boundary.
+ * Backward-compatible function alias.
+ */
+export async function fetchCaptionsFromExtractYoutube(
+    videoId: string,
+    options: ScrapingBeeSubtitlesOptions & { apiKey?: string; transcriptApi?: unknown } = {}
+): Promise<ScrapingBeeResult> {
+    return fetchSubtitlesFromScrapingBee(videoId, options.apiKey || "", options)
+}
+
+/**
+ * Central orchestrator for YouTube transcript extraction.
+ * ScrapingBee is the sole provider. Supadata calls and fallbacks are completely disabled.
  */
 export async function extractYouTubeTranscript(
     videoId: string,
     env: AppEnv,
-    options: {
-        lang?: string
+    options: ScrapingBeeSubtitlesOptions & {
         forceAiTranscription?: boolean
-        signal?: AbortSignal
-        timeoutMs?: number
-        requestId?: string
-        disableFallback?: boolean
-        transcriptApi?: {
-            listTranscripts(videoId: string): Promise<TranscriptList | Iterable<Transcript>>
-        }
+        transcriptApi?: unknown
     } = {}
 ): Promise<ExtractTranscriptPipelineResult> {
-    const { forceAiTranscription = false, lang } = options
+    const { forceAiTranscription = false } = options
     const requestId = options.requestId || generateCorrelationId()
     const runtime = detectExecutionRuntime()
 
-    // 1. Explicit AI transcription (requires user confirmation)
+    // Explicit confirmation / AI transcription path:
+    // Supadata AI calls are disabled; ScrapingBee is the sole provider.
     if (forceAiTranscription) {
-        const apiKey = env.SUPADATA_API_KEY
-        if (!apiKey || !apiKey.trim()) {
-            throw new SupadataError(
-                "SUPADATA_API_KEY is not configured in server secrets.",
-                "MISSING_API_KEY",
-                500,
-                false
-            )
+        return {
+            transcript: null,
+            provider: null,
+            needsConfirmation: false,
+            message:
+                "AI speech-to-text transcription is disabled. ScrapingBee is the sole transcript provider.",
+            diagnostic: {
+                event: "scrapingbee.failed",
+                requestId,
+                provider: "scrapingbee",
+                failureCategory: "captions_unavailable",
+                message:
+                    "AI speech-to-text transcription is disabled. ScrapingBee is the sole transcript provider.",
+            },
         }
-
-        const startResult = await startAiTranscription(videoId, apiKey, {
-            lang,
-            signal: options.signal,
-            timeoutMs: options.timeoutMs,
-        })
-
-        if (startResult.transcript) {
-            return {
-                transcript: {
-                    ...startResult.transcript,
-                    provider: "supadata-ai",
-                },
-                provider: "supadata-ai",
-                needsConfirmation: false,
-            }
-        }
-
-        if (startResult.jobId) {
-            const polled = await pollAiTranscriptionJob(startResult.jobId, videoId, apiKey, {
-                lang,
-                signal: options.signal,
-            })
-            return {
-                transcript: {
-                    ...polled,
-                    provider: "supadata-ai",
-                },
-                provider: "supadata-ai",
-                needsConfirmation: false,
-            }
-        }
-
-        throw new SupadataError(
-            "Supadata AI transcription returned neither transcript nor jobId.",
-            "PROVIDER_ERROR",
-            500,
-            false
-        )
     }
 
-    // 2. Primary Provider: extract-youtube
-    let primaryResult = await fetchCaptionsFromExtractYoutube(videoId, {
-        lang,
-        signal: options.signal,
-        timeoutMs: options.timeoutMs,
-        transcriptApi: options.transcriptApi,
+    const apiKey = env.SCRAPINGBEE_API_KEY
+    if (!apiKey || !apiKey.trim()) {
+        logDiagnostic({
+            event: "scrapingbee.failed",
+            requestId,
+            videoId,
+            provider: "scrapingbee",
+            attempt: 1,
+            runtime,
+            success: false,
+            failureCategory: "http_error",
+            errorMessage: "SCRAPINGBEE_API_KEY is not configured in server secrets.",
+            durationMs: 0,
+        })
+        return {
+            transcript: null,
+            provider: null,
+            needsConfirmation: false,
+            message: "SCRAPINGBEE_API_KEY is not configured in server secrets.",
+            diagnostic: {
+                event: "scrapingbee.failed",
+                requestId,
+                provider: "scrapingbee",
+                failureCategory: "http_error",
+                message: "SCRAPINGBEE_API_KEY is not configured in server secrets.",
+            },
+        }
+    }
+
+    // Sole Provider: ScrapingBee
+    let result = await fetchSubtitlesFromScrapingBee(videoId, apiKey, {
+        ...options,
         requestId,
         attempt: 1,
     })
 
     // Bounded retry (1 retry) on transient errors if not aborted
-    if (!primaryResult.found && primaryResult.isRetryable && !options.signal?.aborted) {
+    if (!result.found && result.isRetryable && !options.signal?.aborted) {
         logDiagnostic({
-            event: "extract_youtube.retry_started",
+            event: "scrapingbee.retry_started",
             requestId,
             videoId,
-            provider: "extract-youtube",
+            provider: "scrapingbee",
             attempt: 2,
             runtime,
         })
         await new Promise((resolve) => setTimeout(resolve, 500))
-        primaryResult = await fetchCaptionsFromExtractYoutube(videoId, {
-            lang,
-            signal: options.signal,
-            timeoutMs: options.timeoutMs,
-            transcriptApi: options.transcriptApi,
+        result = await fetchSubtitlesFromScrapingBee(videoId, apiKey, {
+            ...options,
             requestId,
             attempt: 2,
         })
     }
 
-    if (primaryResult.found) {
+    if (result.found) {
         return {
-            transcript: primaryResult.transcript,
-            provider: "extract-youtube",
+            transcript: result.transcript,
+            provider: "scrapingbee",
             needsConfirmation: false,
         }
     }
 
-    // Phase 7: Optional diagnostic mode to safely disable fallback
-    const disableFallback =
-        options.disableFallback ?? (env.DISABLE_TRANSCRIPT_FALLBACK === "true")
-    if (disableFallback) {
-        return {
-            transcript: null,
-            provider: null,
-            needsConfirmation: true,
-            message: `Primary caption extraction failed (${primaryResult.message}) and fallback is disabled for diagnostic testing.`,
-            diagnostic: {
-                event: "extract_youtube.failed",
-                requestId,
-                provider: "extract-youtube",
-                failureCategory: primaryResult.failureCategory,
-                message: primaryResult.message,
-            },
-        }
-    }
-
-    // 3. Fallback Provider: Supadata native captions
-    logDiagnostic({
-        event: "transcript_provider.fallback_started",
-        requestId,
-        videoId,
-        provider: "extract-youtube",
-        fallbackProvider: "supadata",
-        failureCategory: primaryResult.failureCategory,
-        runtime,
-    })
-
-    const apiKey = env.SUPADATA_API_KEY
-    if (!apiKey || !apiKey.trim()) {
-        if (
-            primaryResult.failureCategory === "captions_unavailable" ||
-            primaryResult.failureCategory === "empty_transcript" ||
-            primaryResult.reason === "no_captions"
-        ) {
-            return {
-                transcript: null,
-                provider: null,
-                needsConfirmation: true,
-                message:
-                    "No native captions found. AI speech-to-text transcription is available with user confirmation.",
-                diagnostic: {
-                    event: "transcript_provider.fallback_failed",
-                    requestId,
-                    provider: "supadata",
-                    failureCategory: primaryResult.failureCategory,
-                    message: "SUPADATA_API_KEY not configured for fallback.",
-                },
-            }
-        }
-        throw new SupadataError(
-            `Primary caption extraction failed (${primaryResult.message}) and Supadata fallback is unavailable because SUPADATA_API_KEY is not configured in server secrets.`,
-            "MISSING_API_KEY",
-            500,
-            false
-        )
-    }
-
-    const fallbackStartTime = Date.now()
-    const nativeResult = await fetchNativeCaptions(videoId, apiKey, {
-        lang,
-        signal: options.signal,
-        timeoutMs: options.timeoutMs,
-    })
-    const fallbackDuration = Date.now() - fallbackStartTime
-
-    if (nativeResult.found) {
-        logDiagnostic({
-            event: "transcript_provider.fallback_completed",
-            requestId,
-            videoId,
-            fallbackProvider: "supadata",
-            success: true,
-            captionCount: nativeResult.transcript.segments.length,
-            durationMs: fallbackDuration,
-            language: nativeResult.transcript.lang,
-            runtime,
-        })
-
-        return {
-            transcript: {
-                ...nativeResult.transcript,
-                provider: "supadata",
-            },
-            provider: "supadata",
-            needsConfirmation: false,
-            diagnostic: {
-                event: "transcript_provider.fallback_started",
-                requestId,
-                provider: "extract-youtube",
-                failureCategory: primaryResult.failureCategory,
-                message: `Primary provider failed (${primaryResult.message}); fell back to Supadata successfully.`,
-            },
-        }
-    }
-
-    logDiagnostic({
-        event: "transcript_provider.fallback_failed",
-        requestId,
-        videoId,
-        fallbackProvider: "supadata",
-        success: false,
-        errorMessage: nativeResult.message,
-        failureCategory:
-            nativeResult.reason === "no_captions" ? "captions_unavailable" : "http_error",
-        durationMs: fallbackDuration,
-        runtime,
-    })
-
+    // Single-provider failure: No fallback to Supadata
     return {
         transcript: null,
         provider: null,
-        needsConfirmation: true,
-        message:
-            "No native captions found. AI speech-to-text transcription is available with user confirmation.",
+        needsConfirmation: false,
+        message: result.message,
         diagnostic: {
-            event: "transcript_provider.fallback_failed",
+            event: "scrapingbee.failed",
             requestId,
-            provider: "supadata",
-            failureCategory:
-                nativeResult.reason === "no_captions" ? "captions_unavailable" : "http_error",
-            message: `Both primary (extract-youtube: ${primaryResult.message}) and fallback (supadata: ${nativeResult.message}) failed.`,
+            provider: "scrapingbee",
+            failureCategory: result.failureCategory,
+            message: result.message,
         },
     }
 }

@@ -36,7 +36,7 @@ export interface NormalizedTranscript {
     videoId: string
     lang: string
     source: "native" | "ai"
-    provider?: "extract-youtube" | "supadata" | "supadata-ai"
+    provider?: "scrapingbee" | "supadata" | "supadata-ai"
     segments: TranscriptSegment[]
     fullText: string
     duration: number // total duration in seconds

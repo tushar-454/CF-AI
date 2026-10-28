@@ -53,8 +53,10 @@ export default defineConfig({
             }),
             // Application security PIN secret binding
             APP_PIN: bindings.secret(),
-            // Supadata API secret binding
+            // Supadata API secret binding (kept for compatibility)
             SUPADATA_API_KEY: bindings.secret(),
+            // ScrapingBee API secret binding for YouTube transcript extraction
+            SCRAPINGBEE_API_KEY: bindings.secret(),
         },
     }),
 })

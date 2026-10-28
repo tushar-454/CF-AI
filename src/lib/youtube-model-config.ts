@@ -27,11 +27,14 @@ export const YOUTUBE_CHAT_CONFIG = {
     chunkOverlap: 100, // overlap characters
     maxContextCharBudget: 16000,
 
-    // Transcript provider: Supadata API configuration
+    // Transcript provider: ScrapingBee Subtitles API configuration
+    scrapingbeeBaseUrl: "https://app.scrapingbee.com/api/v1/youtube/subtitles",
+
+    // Supadata API configuration (legacy/fallback reference)
     supadataBaseUrl: "https://api.supadata.ai/v1",
     pollIntervalMs: 2500,
     maxPollRetries: 40,
-    requestTimeoutMs: 15000,
+    requestTimeoutMs: 35000,
 
     // Cloudflare Workflow configuration
     workflowMaxRetries: 3,

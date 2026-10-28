@@ -22,6 +22,15 @@ export type YoutubeFailureCategory =
     | "unknown"
 
 export type YoutubeLogEvent =
+    | "scrapingbee.started"
+    | "scrapingbee.video_id_validated"
+    | "scrapingbee.request_started"
+    | "scrapingbee.response_received"
+    | "scrapingbee.transcript_received"
+    | "scrapingbee.transcript_validation_failed"
+    | "scrapingbee.failed"
+    | "scrapingbee.retry_started"
+    | "scrapingbee.completed"
     | "extract_youtube.started"
     | "extract_youtube.video_id_validated"
     | "extract_youtube.request_started"
@@ -97,7 +106,12 @@ export function detectExecutionRuntime(): string {
  */
 export function sanitizeRequestUrl(rawUrl: string): string {
     try {
-        const parsed = new URL(rawUrl)
+        let sanitized = rawUrl.replace(/([?&]api_key=)[^&]+/gi, "$1[REDACTED]")
+        sanitized = sanitized.replace(/([?&]key=)[^&]+/gi, "$1[REDACTED]")
+        const parsed = new URL(sanitized)
+        if (parsed.hostname.includes("scrapingbee.com")) {
+            return sanitized
+        }
         if (parsed.hostname.includes("youtube.com")) {
             if (parsed.pathname === "/watch") {
                 const vid = parsed.searchParams.get("v")
@@ -138,14 +152,20 @@ export function sanitizeStructuredLog(payload: StructuredLogPayload): Structured
         )
     }
 
-    if (sanitized.playabilityStatus && /bearer\s+|key=|api_key=|secret=/i.test(sanitized.playabilityStatus)) {
+    if (
+        sanitized.playabilityStatus &&
+        /bearer\s+|key=|api_key=|secret=/i.test(sanitized.playabilityStatus)
+    ) {
         sanitized.playabilityStatus = sanitized.playabilityStatus.replace(
             /(bearer\s+[\w.-]+|key=[\w.-]+|api_key=[\w.-]+|secret=[\w.-]+)/gi,
             "[REDACTED]"
         )
     }
 
-    if (sanitized.playabilityReason && /bearer\s+|key=|api_key=|secret=/i.test(sanitized.playabilityReason)) {
+    if (
+        sanitized.playabilityReason &&
+        /bearer\s+|key=|api_key=|secret=/i.test(sanitized.playabilityReason)
+    ) {
         sanitized.playabilityReason = sanitized.playabilityReason.replace(
             /(bearer\s+[\w.-]+|key=[\w.-]+|api_key=[\w.-]+|secret=[\w.-]+)/gi,
             "[REDACTED]"
@@ -176,13 +196,16 @@ export function logDiagnostic(payload: StructuredLogPayload): void {
     const logLine = `[youtube-transcript] ${JSON.stringify(sanitized)}`
 
     if (
+        sanitized.event === "scrapingbee.failed" ||
         sanitized.event === "extract_youtube.failed" ||
         sanitized.event === "transcript_provider.fallback_failed" ||
+        sanitized.event === "scrapingbee.transcript_validation_failed" ||
         sanitized.event === "extract_youtube.transcript_validation_failed"
     ) {
         console.error(logLine)
     } else if (
         sanitized.event === "transcript_provider.fallback_started" ||
+        sanitized.event === "scrapingbee.retry_started" ||
         sanitized.event === "extract_youtube.retry_started" ||
         sanitized.success === false
     ) {
@@ -206,8 +229,8 @@ export function validateTranscriptSnippets(snippets: unknown): {
     if (!snippets || !Array.isArray(snippets)) {
         return {
             valid: false,
-            failureCategory: "invalid_response",
-            reason: "Snippets payload is not an array.",
+            failureCategory: "empty_transcript",
+            reason: "Transcript returned 0 snippets.",
             count: 0,
             totalCharacters: 0,
         }
@@ -427,9 +450,28 @@ export function classifyYoutubeError(
     if (
         errorName === "NoTranscriptFound" ||
         errorName === "TranscriptsDisabled" ||
-        /subtitles\s+are\s+disabled|no\s+transcript\s+found|no\s+caption\s+tracks/i.test(message)
+        httpStatus === 404 ||
+        httpStatus === 204 ||
+        /subtitles\s+are\s+disabled|no\s+transcript\s+found|no\s+caption\s+tracks|no\s+subtitles\s+found|captions\s+are\s+unavailable/i.test(
+            message
+        )
     ) {
-        return buildResult("captions_unavailable", "Captions are disabled or unavailable for this video.")
+        return buildResult(
+            "captions_unavailable",
+            "Captions are disabled or unavailable for this video."
+        )
+    }
+
+    // 4a. ScrapingBee Auth & Quota Errors
+    if (httpStatus === 401 || /invalid\s+(api\s+)?key|unauthorized/i.test(message)) {
+        const res = buildResult("http_error", undefined, 401)
+        res.message = "Invalid ScrapingBee API key or unauthorized request."
+        return res
+    }
+    if (httpStatus === 403 || /credit\s+limit|forbidden/i.test(message)) {
+        const res = buildResult("http_error", undefined, 403)
+        res.message = "ScrapingBee credit limit exceeded or feature forbidden."
+        return res
     }
 
     // 5. Language Unavailable / Not Translatable
@@ -455,7 +497,10 @@ export function classifyYoutubeError(
         /fetch\s+failed|network\s+error|econnrefused|enotfound|ehostunreach/i.test(message) ||
         (errorName === "TypeError" && /fetch/i.test(message))
     ) {
-        return buildResult("network_error", "Network connection failure communicating with YouTube.")
+        return buildResult(
+            "network_error",
+            "Network connection failure communicating with YouTube."
+        )
     }
 
     // 8. Cloudflare Runtime Incompatibility

@@ -3,3 +3,4 @@
 # If you add any custom API secrets, declare them here.
 APP_PIN=your_4_digit_pin_here
 SUPADATA_API_KEY=your_supadata_api_key_here
+SCRAPINGBEE_API_KEY=your_scrapingbee_api_key_here

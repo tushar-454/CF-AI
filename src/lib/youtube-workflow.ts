@@ -157,22 +157,22 @@ export class YoutubeProcessingWorkflow extends WorkflowEntrypoint<AppEnv, Youtub
 
             const workflowTargetLang = cacheCheck.targetLang || "en"
 
-            // Step 2: Transcript retrieval (primary: extract-youtube, fallback: supadata native, confirmation: supadata AI)
+            // Step 2: Transcript retrieval (ScrapingBee sole provider)
             const transcriptResult = await step.do("extract-transcript", async () => {
                 await report("extracting", 20, "Extracting captions from YouTube...")
 
                 const extractionResult = await extractYouTubeTranscript(videoId, this.env, {
                     lang: workflowTargetLang,
                     forceAiTranscription,
+                    fetchFn: event.payload.fetchFn,
                     transcriptApi: event.payload.transcriptApi,
                 })
 
-                if (extractionResult.needsConfirmation || !extractionResult.transcript) {
+                if (extractionResult.needsConfirmation) {
                     await report(
                         "awaiting_confirmation",
                         25,
-                        extractionResult.message ||
-                            "No native captions found. AI speech-to-text transcription is available with user confirmation.",
+                        extractionResult.message || "Explicit confirmation is required.",
                         {
                             needsConfirmation: true,
                             diagnostic: extractionResult.diagnostic,
@@ -181,19 +181,36 @@ export class YoutubeProcessingWorkflow extends WorkflowEntrypoint<AppEnv, Youtub
                     return { transcript: null, needsConfirmation: true }
                 }
 
+                if (!extractionResult.transcript) {
+                    const failMsg =
+                        extractionResult.message ||
+                        "Captions are unavailable for this YouTube video."
+                    await report("failed", currentProgress, failMsg)
+                    return {
+                        transcript: null,
+                        needsConfirmation: false,
+                        errorMessage: failMsg,
+                    }
+                }
+
                 if (extractionResult.diagnostic) {
-                    await report(
-                        "extracting",
-                        30,
-                        extractionResult.diagnostic.message,
-                        { diagnostic: extractionResult.diagnostic }
-                    )
+                    await report("extracting", 30, extractionResult.diagnostic.message, {
+                        diagnostic: extractionResult.diagnostic,
+                    })
                 }
 
                 return { transcript: extractionResult.transcript, needsConfirmation: false }
             })
 
             if (transcriptResult.needsConfirmation || !transcriptResult.transcript) {
+                if (transcriptResult.errorMessage) {
+                    await failYoutubeVideo(
+                        videoId,
+                        transcriptResult.errorMessage,
+                        "extracting",
+                        this.env.DB
+                    ).catch(() => {})
+                }
                 return
             }
 

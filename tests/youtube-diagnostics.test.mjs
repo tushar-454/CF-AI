@@ -1,6 +1,6 @@
 /**
  * Dedicated test suite for YouTube Caption Extractor Diagnostics, Structured Logging,
- * Error Classification, and Fallback Telemetry.
+ * Error Classification, and ScrapingBee Subtitles Telemetry.
  */
 
 import test from "node:test"
@@ -14,43 +14,30 @@ import {
 } from "../src/lib/youtube-diagnostics.ts"
 import {
     extractYouTubeTranscript,
-    fetchCaptionsFromExtractYoutube,
+    fetchSubtitlesFromScrapingBee,
+    normalizeScrapingBeeSubtitles,
+    parseScrapingBeeSubtitles,
 } from "../src/lib/youtube-extractor.ts"
-import {
-    IpBlocked,
-    NoTranscriptFound,
-    RequestBlocked,
-    VideoUnavailable,
-    YouTubeRequestFailed,
-} from "extract-youtube"
 
-function createMockTrack({
-    languageCode = "en",
-    isGenerated = false,
-    snippets = [
+function createMockScrapingBeeSubtitles({
+    language = "en",
+    subtitle_origin = "uploader_provided",
+    subtitles = [
         { text: "Hello and welcome to this video.", start: 0, duration: 3.5 },
         { text: "Today we explore edge computing.", start: 3.5, duration: 4.0 },
     ],
 } = {}) {
     return {
-        languageCode,
-        language: "English",
-        isGenerated,
-        translationLanguages: [],
-        async fetch() {
-            return {
-                snippets,
-                languageCode,
-                language: "English",
-                isGenerated,
-            }
-        },
+        video_id: "dQw4w9WgXcQ",
+        language,
+        subtitle_origin,
+        subtitles,
     }
 }
 
 test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
-    // 1. Successful extract-youtube extraction emits structured logs and doesn't call fallback
-    await t.test("1. Successful extract-youtube extraction emits structured logs", async () => {
+    // 1. Successful ScrapingBee extraction emits structured logs and doesn't call fallback
+    await t.test("1. Successful ScrapingBee extraction emits structured logs", async () => {
         const logs = []
         const originalLog = console.log
         console.log = (msg) => {
@@ -61,31 +48,37 @@ test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
         }
 
         try {
-            const mockApi = {
-                async listTranscripts() {
-                    return [createMockTrack()]
-                },
+            const mockFetch = async (url, options) => {
+                assert.ok(String(url).includes("video_id=dQw4w9WgXcQ"))
+                assert.strictEqual(options?.headers?.Authorization, "Bearer mock_scrapingbee_key")
+                return new Response(JSON.stringify(createMockScrapingBeeSubtitles()), {
+                    status: 200,
+                    headers: { "Content-Type": "application/json" },
+                })
             }
 
             const requestId = "test_req_success_1"
             const result = await extractYouTubeTranscript(
                 "dQw4w9WgXcQ",
-                { SUPADATA_API_KEY: "mock_key" },
-                { lang: "en", transcriptApi: mockApi, requestId }
+                { SCRAPINGBEE_API_KEY: "mock_scrapingbee_key" },
+                { lang: "en", fetchFn: mockFetch, requestId }
             )
 
             assert.strictEqual(result.needsConfirmation, false)
-            assert.strictEqual(result.provider, "extract-youtube")
+            assert.strictEqual(result.provider, "scrapingbee")
             assert.strictEqual(result.transcript.segments.length, 2)
+            assert.strictEqual(result.transcript.provider, "scrapingbee")
 
             const events = logs.map((l) => l.event)
-            assert.ok(events.includes("extract_youtube.started"))
-            assert.ok(events.includes("extract_youtube.video_id_validated"))
-            assert.ok(events.includes("extract_youtube.transcript_received"))
-            assert.ok(events.includes("extract_youtube.completed"))
+            assert.ok(events.includes("scrapingbee.started"))
+            assert.ok(events.includes("scrapingbee.video_id_validated"))
+            assert.ok(events.includes("scrapingbee.request_started"))
+            assert.ok(events.includes("scrapingbee.response_received"))
+            assert.ok(events.includes("scrapingbee.transcript_received"))
+            assert.ok(events.includes("scrapingbee.completed"))
             assert.ok(!events.includes("transcript_provider.fallback_started"))
 
-            const completed = logs.find((l) => l.event === "extract_youtube.completed")
+            const completed = logs.find((l) => l.event === "scrapingbee.completed")
             assert.strictEqual(completed.success, true)
             assert.strictEqual(completed.captionCount, 2)
             assert.strictEqual(completed.requestId, requestId)
@@ -103,7 +96,7 @@ test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
         assert.ok(classified.message.includes("document is not defined"))
     })
 
-    // 3. Network timeout classified with bounded retry
+    // 3. Network timeout triggers bounded retry and is classified correctly
     await t.test("3. Network timeout triggers retry and is classified correctly", async () => {
         const logs = []
         const originalWarn = console.warn
@@ -123,71 +116,57 @@ test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
 
         try {
             let callCount = 0
-            const mockApi = {
-                async listTranscripts() {
-                    callCount++
-                    const err = new Error("The operation was aborted due to timeout")
-                    err.name = "TimeoutError"
-                    throw err
-                },
+            const mockFetch = async () => {
+                callCount++
+                const err = new Error("The operation was aborted due to timeout")
+                err.name = "TimeoutError"
+                throw err
             }
 
-            const originalFetch = globalThis.fetch
-            globalThis.fetch = async (url) => {
-                if (String(url).includes("mode=native")) {
-                    return new Response(
-                        JSON.stringify({
-                            content: [{ text: "Fallback segment", offset: 0, duration: 2000 }],
-                        }),
-                        { status: 200, headers: { "Content-Type": "application/json" } }
-                    )
-                }
-                return originalFetch(url)
-            }
+            const requestId = "test_req_timeout_1"
+            const result = await extractYouTubeTranscript(
+                "dQw4w9WgXcQ",
+                { SCRAPINGBEE_API_KEY: "mock_scrapingbee_key" },
+                { lang: "en", fetchFn: mockFetch, requestId }
+            )
 
-            try {
-                const requestId = "test_req_timeout_1"
-                const result = await extractYouTubeTranscript(
-                    "dQw4w9WgXcQ",
-                    { SUPADATA_API_KEY: "mock_key" },
-                    { lang: "en", transcriptApi: mockApi, requestId }
-                )
+            // Verifies bounded retry (exactly 2 attempts: attempt 1 + 1 retry)
+            assert.strictEqual(callCount, 2)
+            assert.strictEqual(result.transcript, null)
+            assert.strictEqual(result.provider, null)
 
-                // Verifies bounded retry (exactly 2 attempts: attempt 1 + 1 retry)
-                assert.strictEqual(callCount, 2)
-                assert.strictEqual(result.provider, "supadata")
+            const retryLog = logs.find((l) => l.event === "scrapingbee.retry_started")
+            assert.ok(retryLog, "Must emit scrapingbee.retry_started")
+            assert.strictEqual(retryLog.attempt, 2)
+            assert.strictEqual(retryLog.requestId, requestId)
 
-                const retryLog = logs.find((l) => l.event === "extract_youtube.retry_started")
-                assert.ok(retryLog, "Must emit extract_youtube.retry_started")
-                assert.strictEqual(retryLog.attempt, 2)
-                assert.strictEqual(retryLog.requestId, requestId)
-
-                const failLogs = logs.filter((l) => l.event === "extract_youtube.failed")
-                assert.strictEqual(failLogs[0].failureCategory, "timeout")
-            } finally {
-                globalThis.fetch = originalFetch
-            }
+            const failLogs = logs.filter((l) => l.event === "scrapingbee.failed")
+            assert.strictEqual(failLogs[0].failureCategory, "timeout")
         } finally {
             console.warn = originalWarn
             console.error = originalError
         }
     })
 
-    // 4. HTTP 429 rate-limit failure classified as youtube_blocked_or_rate_limited
+    // 4. HTTP status code classifications (401, 403, 429)
     await t.test("4. HTTP or rate-limit failure classification", () => {
-        const ipBlocked = new IpBlocked("dQw4w9WgXcQ")
-        const classified1 = classifyYoutubeError(ipBlocked)
-        assert.strictEqual(classified1.category, "youtube_blocked_or_rate_limited")
-        assert.strictEqual(classified1.httpStatus, 429)
+        const classified401 = classifyYoutubeError(new Error("Unauthorized request"), {
+            httpStatus: 401,
+        })
+        assert.strictEqual(classified401.httpStatus, 401)
+        assert.ok(classified401.message.includes("Invalid ScrapingBee API key"))
 
-        const reqBlocked = new RequestBlocked("dQw4w9WgXcQ")
-        const classified2 = classifyYoutubeError(reqBlocked)
-        assert.strictEqual(classified2.category, "youtube_blocked_or_rate_limited")
+        const classified403 = classifyYoutubeError(new Error("Credit limit reached"), {
+            httpStatus: 403,
+        })
+        assert.strictEqual(classified403.httpStatus, 403)
+        assert.ok(classified403.message.includes("ScrapingBee credit limit exceeded"))
 
-        const http403 = new YouTubeRequestFailed("dQw4w9WgXcQ", new Error("HTTP 403: Forbidden"))
-        const classified3 = classifyYoutubeError(http403)
-        assert.strictEqual(classified3.category, "http_error")
-        assert.strictEqual(classified3.httpStatus, 403)
+        const classified429 = classifyYoutubeError(new Error("Too many requests"), {
+            httpStatus: 429,
+        })
+        assert.strictEqual(classified429.category, "youtube_blocked_or_rate_limited")
+        assert.strictEqual(classified429.httpStatus, 429)
     })
 
     // 5. Empty transcript validation
@@ -202,28 +181,23 @@ test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
         }
 
         try {
-            const mockApi = {
-                async listTranscripts() {
-                    return [
-                        createMockTrack({
-                            snippets: [], // 0 snippets
-                        }),
-                    ]
-                },
+            const mockFetch = async () => {
+                return new Response(JSON.stringify({ subtitles: [] }), {
+                    status: 200,
+                    headers: { "Content-Type": "application/json" },
+                })
             }
 
-            const res = await fetchCaptionsFromExtractYoutube("dQw4w9WgXcQ", {
-                transcriptApi: mockApi,
+            const res = await fetchSubtitlesFromScrapingBee("dQw4w9WgXcQ", "mock_key", {
+                fetchFn: mockFetch,
                 requestId: "test_empty_1",
             })
 
             assert.strictEqual(res.found, false)
             assert.strictEqual(res.failureCategory, "empty_transcript")
 
-            const valLog = logs.find(
-                (l) => l.event === "extract_youtube.transcript_validation_failed"
-            )
-            assert.ok(valLog, "Must emit extract_youtube.transcript_validation_failed")
+            const valLog = logs.find((l) => l.event === "scrapingbee.transcript_validation_failed")
+            assert.ok(valLog, "Must emit scrapingbee.transcript_validation_failed")
             assert.strictEqual(valLog.failureCategory, "empty_transcript")
         } finally {
             console.error = originalError
@@ -233,9 +207,7 @@ test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
     // 6. Invalid caption/timestamp structure validation
     await t.test("6. Invalid caption/timestamp structure is caught before success", () => {
         // Negative timestamp
-        const res1 = validateTranscriptSnippets([
-            { text: "Bad cue", start: -5, duration: 2 },
-        ])
+        const res1 = validateTranscriptSnippets([{ text: "Bad cue", start: -5, duration: 2 }])
         assert.strictEqual(res1.valid, false)
         assert.strictEqual(res1.failureCategory, "invalid_timestamps")
 
@@ -263,175 +235,104 @@ test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
         assert.strictEqual(classified.message, "Custom internal failure")
     })
 
-    // 8. Primary failure logged before Supadata fallback begins
-    await t.test("8. Primary failure logged before Supadata fallback begins", async () => {
-        const eventOrder = []
-        const originalLog = console.log
-        const originalWarn = console.warn
-        const originalError = console.error
-
-        const record = (msg) => {
-            if (typeof msg === "string" && msg.startsWith("[youtube-transcript]")) {
-                const parsed = JSON.parse(msg.replace("[youtube-transcript] ", ""))
-                eventOrder.push(parsed.event)
-            }
-        }
-        console.log = (m) => { record(m); originalLog(m) }
-        console.warn = (m) => { record(m); originalWarn(m) }
-        console.error = (m) => { record(m); originalError(m) }
-
-        const originalFetch = globalThis.fetch
-        globalThis.fetch = async (url) => {
-            if (String(url).includes("mode=native")) {
-                return new Response(
-                    JSON.stringify({
-                        content: [{ text: "Fallback text", offset: 0, duration: 1000 }],
-                    }),
-                    { status: 200, headers: { "Content-Type": "application/json" } }
-                )
-            }
-            return originalFetch(url)
-        }
-
-        try {
-            const mockApi = {
-                async listTranscripts() {
-                    throw new VideoUnavailable("dQw4w9WgXcQ")
-                },
-            }
-
-            const result = await extractYouTubeTranscript(
-                "dQw4w9WgXcQ",
-                { SUPADATA_API_KEY: "mock_key" },
-                { lang: "en", transcriptApi: mockApi, requestId: "test_order_1" }
-            )
-
-            assert.strictEqual(result.provider, "supadata")
-
-            const primaryFailIdx = eventOrder.indexOf("extract_youtube.failed")
-            const fallbackStartIdx = eventOrder.indexOf("transcript_provider.fallback_started")
-            const fallbackCompIdx = eventOrder.indexOf("transcript_provider.fallback_completed")
-
-            assert.ok(primaryFailIdx !== -1, "extract_youtube.failed must be logged")
-            assert.ok(fallbackStartIdx !== -1, "transcript_provider.fallback_started must be logged")
-            assert.ok(fallbackCompIdx !== -1, "transcript_provider.fallback_completed must be logged")
-
-            // Critical requirement: Primary failure MUST be logged before fallback begins
-            assert.ok(
-                primaryFailIdx < fallbackStartIdx,
-                "extract_youtube.failed must occur BEFORE transcript_provider.fallback_started"
-            )
-            assert.ok(
-                fallbackStartIdx < fallbackCompIdx,
-                "transcript_provider.fallback_started must occur BEFORE fallback_completed"
-            )
-        } finally {
-            globalThis.fetch = originalFetch
-            console.log = originalLog
-            console.warn = originalWarn
-            console.error = originalError
-        }
-    })
-
-    // 9. Supadata success after primary failure returns correlated diagnostic
-    await t.test("9. Supadata success after primary failure carries diagnostic event", async () => {
-        const originalFetch = globalThis.fetch
-        globalThis.fetch = async (url) => {
-            if (String(url).includes("mode=native")) {
-                return new Response(
-                    JSON.stringify({
-                        content: [{ text: "Supadata retrieved captions", offset: 0, duration: 1500 }],
-                    }),
-                    { status: 200, headers: { "Content-Type": "application/json" } }
-                )
-            }
-            return originalFetch(url)
-        }
-
-        try {
-            const mockApi = {
-                async listTranscripts() {
-                    throw new NoTranscriptFound("dQw4w9WgXcQ", ["en"], [])
-                },
-            }
-
-            const requestId = "test_diag_corr_1"
-            const result = await extractYouTubeTranscript(
-                "dQw4w9WgXcQ",
-                { SUPADATA_API_KEY: "mock_key" },
-                { lang: "en", transcriptApi: mockApi, requestId }
-            )
-
-            assert.strictEqual(result.provider, "supadata")
-            assert.ok(result.diagnostic)
-            assert.strictEqual(result.diagnostic.requestId, requestId)
-            assert.strictEqual(result.diagnostic.failureCategory, "captions_unavailable")
-            assert.strictEqual(result.diagnostic.provider, "extract-youtube")
-            assert.ok(result.diagnostic.message.includes("Primary provider failed"))
-        } finally {
-            globalThis.fetch = originalFetch
-        }
-    })
-
-    // 10. Browser diagnostics are sanitized and correlated
-    await t.test("10. Diagnostic events are sanitized and contain no internal secrets", () => {
-        const sanitized = sanitizeStructuredLog({
-            event: "extract_youtube.failed",
-            requestId: "req_secret_test",
-            errorMessage: "Unauthorized request with key=supa_secret_abc123 and bearer sensitive_tok_xyz",
-            errorCause: "Failed at https://api.supadata.ai/v1/youtube/transcript?api_key=supa_secret_abc123",
-            urlTarget: "https://www.youtube.com/youtubei/v1/player?key=AIzaSyD-secret_key_here",
-            stack: "Error: at /secret/path/to/server.ts:123",
-        })
-
-        assert.ok(!sanitized.errorMessage.includes("supa_secret_abc123"))
-        assert.ok(!sanitized.errorMessage.includes("sensitive_tok_xyz"))
-        assert.ok(sanitized.errorMessage.includes("[REDACTED]"))
-
-        assert.ok(!sanitized.errorCause.includes("supa_secret_abc123"))
-        assert.ok(sanitized.errorCause.includes("[REDACTED]"))
-
-        // URL query parameter stripped
-        assert.strictEqual(sanitized.urlTarget, "https://www.youtube.com/youtubei/v1/player")
-    })
-
-    // 11. Optional diagnostic mode (disableFallback) works safely
-    await t.test("11. Optional diagnostic mode disableFallback prevents Supadata calls", async () => {
+    // 8. ScrapingBee failure does NOT call Supadata fallback
+    await t.test("8. ScrapingBee failure does not invoke Supadata fallback", async () => {
         let supadataCalled = false
         const originalFetch = globalThis.fetch
         globalThis.fetch = async (url) => {
-            if (String(url).includes("mode=native")) {
+            if (String(url).includes("api.supadata.ai")) {
                 supadataCalled = true
-                return new Response("OK", { status: 200 })
+                throw new Error("Supadata MUST NOT be called!")
             }
             return originalFetch(url)
         }
 
         try {
-            const mockApi = {
-                async listTranscripts() {
-                    throw new NoTranscriptFound("dQw4w9WgXcQ", ["en"], [])
-                },
+            const mockFetch = async () => {
+                return new Response("Not Found", { status: 404 })
             }
 
             const result = await extractYouTubeTranscript(
                 "dQw4w9WgXcQ",
-                { SUPADATA_API_KEY: "mock_key" },
-                {
-                    lang: "en",
-                    transcriptApi: mockApi,
-                    disableFallback: true, // Controlled diagnostic mode
-                }
+                { SCRAPINGBEE_API_KEY: "mock_key", SUPADATA_API_KEY: "mock_supadata_key" },
+                { lang: "en", fetchFn: mockFetch, requestId: "test_no_fallback_1" }
             )
 
             assert.strictEqual(result.transcript, null)
-            assert.strictEqual(result.needsConfirmation, true)
-            assert.strictEqual(supadataCalled, false, "Must not invoke Supadata when fallback is disabled")
-            assert.ok(result.message.includes("fallback is disabled"))
+            assert.strictEqual(result.provider, null)
+            assert.strictEqual(
+                supadataCalled,
+                false,
+                "Supadata must not be called when ScrapingBee fails"
+            )
             assert.strictEqual(result.diagnostic?.failureCategory, "captions_unavailable")
         } finally {
             globalThis.fetch = originalFetch
         }
+    })
+
+    // 9. ScrapingBee 404 cleanly classifies as captions_unavailable
+    await t.test("9. ScrapingBee 404 cleanly classifies as captions_unavailable", async () => {
+        const mockFetch = async () => {
+            return new Response("No subtitles found", { status: 404 })
+        }
+
+        const requestId = "test_404_1"
+        const result = await extractYouTubeTranscript(
+            "dQw4w9WgXcQ",
+            { SCRAPINGBEE_API_KEY: "mock_key" },
+            { lang: "en", fetchFn: mockFetch, requestId }
+        )
+
+        assert.strictEqual(result.transcript, null)
+        assert.strictEqual(result.provider, null)
+        assert.strictEqual(result.diagnostic?.failureCategory, "captions_unavailable")
+        assert.ok(result.message.includes("Captions are unavailable"))
+    })
+
+    // 10. Diagnostic events are sanitized and contain no internal secrets
+    await t.test("10. Diagnostic events are sanitized and contain no internal secrets", () => {
+        const sanitized = sanitizeStructuredLog({
+            event: "scrapingbee.failed",
+            requestId: "req_secret_test",
+            errorMessage:
+                "Unauthorized request with key=scrapingbee_secret_abc123 and bearer sensitive_tok_xyz",
+            errorCause: "Failed with api_key=scrapingbee_secret_abc123",
+            urlTarget:
+                "https://app.scrapingbee.com/api/v1/youtube/subtitles?api_key=secret_in_url&video_id=dQw4w9WgXcQ",
+            stack: "Error: at /secret/path/to/server.ts:123",
+        })
+
+        assert.ok(!sanitized.errorMessage.includes("scrapingbee_secret_abc123"))
+        assert.ok(!sanitized.errorMessage.includes("sensitive_tok_xyz"))
+        assert.ok(sanitized.errorMessage.includes("[REDACTED]"))
+
+        assert.ok(!sanitized.errorCause.includes("scrapingbee_secret_abc123"))
+        assert.ok(sanitized.errorCause.includes("[REDACTED]"))
+
+        // URL query parameter stripped
+        assert.ok(!sanitized.urlTarget.includes("secret_in_url"))
+        assert.ok(sanitized.urlTarget.includes("[REDACTED]"))
+    })
+
+    // 11. Missing SCRAPINGBEE_API_KEY produces clear diagnostic without calling network
+    await t.test("11. Missing SCRAPINGBEE_API_KEY fails immediately with clear error", async () => {
+        let networkCalled = false
+        const mockFetch = async () => {
+            networkCalled = true
+            return new Response("OK", { status: 200 })
+        }
+
+        const result = await extractYouTubeTranscript(
+            "dQw4w9WgXcQ",
+            {}, // No SCRAPINGBEE_API_KEY provided
+            { fetchFn: mockFetch }
+        )
+
+        assert.strictEqual(result.transcript, null)
+        assert.strictEqual(result.provider, null)
+        assert.strictEqual(networkCalled, false, "Must not make network request without API key")
+        assert.ok(result.message.includes("SCRAPINGBEE_API_KEY is not configured"))
     })
 
     // 12. Correlation ID generation & execution runtime detection
@@ -445,139 +346,156 @@ test("YouTube Caption Diagnostics and Logging Suite", async (t) => {
         assert.ok(typeof runtime === "string" && runtime.length > 0)
     })
 
-    // 13. YouTube /youtubei/v1/player playabilityStatus and reason logging on failure
-    await t.test("13. YouTube /youtubei/v1/player playabilityStatus and reason logging on failure", async () => {
-        const logs = []
-        const originalError = console.error
-        console.error = (msg) => {
-            if (typeof msg === "string" && msg.startsWith("[youtube-transcript]")) {
-                logs.push(JSON.parse(msg.replace("[youtube-transcript] ", "")))
-            }
-            originalError(msg)
+    // 13. ScrapingBee 500 error classification and retry
+    await t.test("13. ScrapingBee 500 server error triggers bounded retry", async () => {
+        let callCount = 0
+        const mockFetch = async () => {
+            callCount++
+            return new Response("Internal Server Error", { status: 500 })
         }
 
-        const originalFetch = globalThis.fetch
-        // Mock global fetch to intercept /youtubei/v1/player
-        globalThis.fetch = async (url, options) => {
-            const urlStr = String(url)
-            if (urlStr.includes("/youtubei/v1/player")) {
-                return new Response(
-                    JSON.stringify({
-                        playabilityStatus: {
-                            status: "LOGIN_REQUIRED",
-                            reason: "Sign in to confirm you're not a bot",
-                        },
-                    }),
-                    {
-                        status: 200,
-                        headers: { "Content-Type": "application/json" },
-                    }
-                )
-            }
-            return originalFetch(url, options)
-        }
+        const result = await extractYouTubeTranscript(
+            "dQw4w9WgXcQ",
+            { SCRAPINGBEE_API_KEY: "mock_key" },
+            { fetchFn: mockFetch }
+        )
 
-        try {
-            const requestId = "test_player_playability_1"
-            const result = await fetchCaptionsFromExtractYoutube("dQw4w9WgXcQ", {
-                requestId,
-            })
-
-            assert.strictEqual(result.found, false)
-            assert.strictEqual(result.playabilityStatus, "LOGIN_REQUIRED")
-            assert.strictEqual(result.playabilityReason, "Sign in to confirm you're not a bot")
-
-            const failedLog = logs.find((l) => l.event === "extract_youtube.failed" && l.requestId === requestId)
-            assert.ok(failedLog, "Must emit extract_youtube.failed")
-            assert.strictEqual(failedLog.playabilityStatus, "LOGIN_REQUIRED")
-            assert.strictEqual(failedLog.playabilityReason, "Sign in to confirm you're not a bot")
-            assert.strictEqual(failedLog.failureCategory, "youtube_blocked_or_rate_limited")
-        } finally {
-            globalThis.fetch = originalFetch
-            console.error = originalError
-        }
+        assert.strictEqual(callCount, 2, "Must retry exactly once on 500 server error")
+        assert.strictEqual(result.transcript, null)
+        assert.strictEqual(result.diagnostic?.failureCategory, "http_error")
     })
 
-    // 14. Playability reason secret sanitization & Supadata fallback preservation
-    await t.test("14. Playability reason secret sanitization and Supadata fallback preservation", async () => {
-        const logs = []
-        const originalLog = console.log
-        const originalWarn = console.warn
-        const originalError = console.error
+    // 14. Normalization converts seconds and handles both array and wrapped response formats
+    await t.test("14. Normalizer converts seconds accurately and sets scrapingbee provider", () => {
+        const rawCues = [
+            { text: "  First caption line  ", start: 1.25, duration: 2.5 },
+            { text: "Second caption line", start: "3.75", duration: "1.5" },
+        ]
 
-        console.log = (m) => {
-            if (typeof m === "string" && m.startsWith("[youtube-transcript]")) {
-                logs.push(JSON.parse(m.replace("[youtube-transcript] ", "")))
-            }
-            originalLog(m)
-        }
-        console.warn = (m) => {
-            if (typeof m === "string" && m.startsWith("[youtube-transcript]")) {
-                logs.push(JSON.parse(m.replace("[youtube-transcript] ", "")))
-            }
-            originalWarn(m)
-        }
-        console.error = (m) => {
-            if (typeof m === "string" && m.startsWith("[youtube-transcript]")) {
-                logs.push(JSON.parse(m.replace("[youtube-transcript] ", "")))
-            }
-            originalError(m)
-        }
+        const norm = normalizeScrapingBeeSubtitles(rawCues, "dQw4w9WgXcQ", "en")
+        assert.strictEqual(norm.provider, "scrapingbee")
+        assert.strictEqual(norm.source, "native")
+        assert.strictEqual(norm.segments.length, 2)
+        assert.strictEqual(norm.segments[0].text, "First caption line")
+        assert.strictEqual(norm.segments[0].startSeconds, 1.25)
+        assert.strictEqual(norm.segments[0].endSeconds, 3.75)
+        assert.strictEqual(norm.segments[1].startSeconds, 3.75)
+        assert.strictEqual(norm.segments[1].endSeconds, 5.25)
+        assert.strictEqual(norm.duration, 6)
+    })
 
-        const originalFetch = globalThis.fetch
-        globalThis.fetch = async (url, options) => {
-            const urlStr = String(url)
-            if (urlStr.includes("/youtubei/v1/player")) {
-                return new Response(
-                    JSON.stringify({
-                        playabilityStatus: {
-                            status: "ERROR",
-                            reason: "Video blocked with key=AIzaSySecretApiKey123 and bearer sensitive_token",
-                        },
-                    }),
-                    {
-                        status: 200,
-                        headers: { "Content-Type": "application/json" },
-                    }
-                )
+    // 15. ScrapingBee real nested schema parsing with ms timestamps and snippet runs
+    await t.test(
+        "15. parseScrapingBeeSubtitles handles real YouTube nested schema, snippet runs, and ms times",
+        () => {
+            const realScrapingBeePayload = {
+                subtitles: {
+                    auto_generated: {
+                        en: [
+                            {
+                                d_duration_ms: "2000",
+                                snippet: { runs: [{ text: "Auto" }, { text: " generated line" }] },
+                                start_ms: "100",
+                            },
+                        ],
+                    },
+                    uploader_provided: {
+                        en: [
+                            {
+                                d_duration_ms: "3650",
+                                snippet: {
+                                    runs: [
+                                        {
+                                            text: "Hi everyone, I'm Anson Alexander\nand welcome to my beginners tutorial for",
+                                        },
+                                    ],
+                                },
+                                start_ms: "350",
+                            },
+                            {
+                                d_duration_ms: "1999",
+                                snippet: {
+                                    runs: [{ text: "using macOS." }],
+                                },
+                                start_ms: "4001",
+                            },
+                        ],
+                    },
+                },
             }
-            if (urlStr.includes("mode=native")) {
-                return new Response(
-                    JSON.stringify({
-                        content: [{ text: "Supadata retrieved captions", offset: 0, duration: 1000 }],
-                    }),
-                    {
-                        status: 200,
-                        headers: { "Content-Type": "application/json" },
-                    }
-                )
-            }
-            return originalFetch(url, options)
-        }
 
-        try {
-            const requestId = "test_player_sanitize_1"
+            // By default, prefers uploader_provided over auto_generated
+            const parsed = parseScrapingBeeSubtitles(realScrapingBeePayload, { lang: "en" })
+            assert.strictEqual(parsed.language, "en")
+            assert.strictEqual(parsed.isGenerated, false)
+            assert.strictEqual(parsed.origin, "uploader_provided")
+            assert.ok(parsed.cues)
+            assert.strictEqual(parsed.cues.length, 2)
+            assert.strictEqual(
+                parsed.cues[0].text,
+                "Hi everyone, I'm Anson Alexander and welcome to my beginners tutorial for"
+            )
+            assert.strictEqual(parsed.cues[0].start, 0.35)
+            assert.strictEqual(parsed.cues[0].duration, 3.65)
+            assert.strictEqual(parsed.cues[1].text, "using macOS.")
+            assert.strictEqual(parsed.cues[1].start, 4)
+            assert.strictEqual(parsed.cues[1].duration, 2)
+
+            // When options.subtitleOrigin is auto_generated, prefers auto_generated
+            const parsedAuto = parseScrapingBeeSubtitles(realScrapingBeePayload, {
+                lang: "en",
+                subtitleOrigin: "auto_generated",
+            })
+            assert.strictEqual(parsedAuto.isGenerated, true)
+            assert.strictEqual(parsedAuto.origin, "auto_generated")
+            assert.ok(parsedAuto.cues)
+            assert.strictEqual(parsedAuto.cues.length, 1)
+            assert.strictEqual(parsedAuto.cues[0].text, "Auto generated line")
+            assert.strictEqual(parsedAuto.cues[0].start, 0.1)
+            assert.strictEqual(parsedAuto.cues[0].duration, 2)
+        }
+    )
+
+    // 16. extractYouTubeTranscript end-to-end with real ScrapingBee nested response
+    await t.test(
+        "16. extractYouTubeTranscript extracts and normalizes real ScrapingBee nested subtitles response",
+        async () => {
+            const realScrapingBeePayload = {
+                subtitles: {
+                    uploader_provided: {
+                        en: [
+                            {
+                                d_duration_ms: "3650",
+                                snippet: {
+                                    runs: [{ text: "Welcome to this tutorial." }],
+                                },
+                                start_ms: "350",
+                            },
+                        ],
+                    },
+                },
+            }
+
+            const mockFetch = async () => {
+                return new Response(JSON.stringify(realScrapingBeePayload), {
+                    status: 200,
+                    headers: { "Content-Type": "application/json" },
+                })
+            }
+
             const result = await extractYouTubeTranscript(
                 "dQw4w9WgXcQ",
-                { SUPADATA_API_KEY: "mock_key" },
-                { requestId }
+                { SCRAPINGBEE_API_KEY: "mock_key" },
+                { fetchFn: mockFetch, lang: "en" }
             )
 
-            // Supadata fallback is preserved and succeeded
-            assert.strictEqual(result.provider, "supadata")
+            assert.strictEqual(result.needsConfirmation, false)
+            assert.ok(result.transcript)
+            assert.strictEqual(result.transcript.provider, "scrapingbee")
             assert.strictEqual(result.transcript.segments.length, 1)
-
-            const failLog = logs.find((l) => l.event === "extract_youtube.failed" && l.requestId === requestId)
-            assert.ok(failLog, "Must emit extract_youtube.failed")
-            assert.strictEqual(failLog.playabilityStatus, "ERROR")
-            assert.ok(!failLog.playabilityReason.includes("AIzaSySecretApiKey123"))
-            assert.ok(!failLog.playabilityReason.includes("sensitive_token"))
-            assert.ok(failLog.playabilityReason.includes("[REDACTED]"))
-        } finally {
-            globalThis.fetch = originalFetch
-            console.log = originalLog
-            console.warn = originalWarn
-            console.error = originalError
+            assert.strictEqual(result.transcript.segments[0].text, "Welcome to this tutorial.")
+            assert.strictEqual(result.transcript.segments[0].startSeconds, 0.35)
+            assert.strictEqual(result.transcript.segments[0].endSeconds, 4)
         }
-    })
+    )
 })

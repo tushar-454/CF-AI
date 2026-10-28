@@ -27,7 +27,6 @@ import {
     persistYoutubeR2Artifacts,
     verifyYoutubeIndexingComplete,
 } from "./youtube-rag"
-import type { Transcript, TranscriptList } from "extract-youtube"
 import type {
     YoutubeChunk,
     YoutubeProgressEvent,
@@ -43,9 +42,8 @@ export interface YoutubeWorkflowParams {
     url: string
     forceAiTranscription?: boolean
     title?: string
-    transcriptApi?: {
-        listTranscripts(videoId: string): Promise<TranscriptList | Iterable<Transcript>>
-    }
+    fetchFn?: typeof fetch
+    transcriptApi?: unknown
 }
 
 export async function publishVideoProgress(
@@ -189,21 +187,21 @@ export async function executeYoutubePipeline(
             await updateYoutubeVideoProgress(videoId, { title: detected.title }, env.DB)
         }
 
-        // Step 2: Transcript retrieval (primary: extract-youtube, fallback: supadata native, confirmation: supadata AI)
+        // Step 2: Transcript retrieval (ScrapingBee sole provider)
         await report("extracting", 20, "Extracting captions from YouTube...")
 
         const extractionResult = await extractYouTubeTranscript(videoId, env, {
             lang: targetLang,
             forceAiTranscription,
+            fetchFn: params.fetchFn,
             transcriptApi: params.transcriptApi,
         })
 
-        if (extractionResult.needsConfirmation || !extractionResult.transcript) {
+        if (extractionResult.needsConfirmation) {
             await report(
                 "awaiting_confirmation",
                 25,
-                extractionResult.message ||
-                    "No native captions found. AI speech-to-text transcription is available with user confirmation.",
+                extractionResult.message || "Explicit confirmation is required.",
                 {
                     needsConfirmation: true,
                     diagnostic: extractionResult.diagnostic,
@@ -212,13 +210,16 @@ export async function executeYoutubePipeline(
             return { success: false, awaitingConfirmation: true }
         }
 
-        if (extractionResult.diagnostic) {
-            await report(
-                "extracting",
-                30,
-                extractionResult.diagnostic.message,
-                { diagnostic: extractionResult.diagnostic }
+        if (!extractionResult.transcript) {
+            throw new Error(
+                extractionResult.message || "Captions are unavailable for this YouTube video."
             )
+        }
+
+        if (extractionResult.diagnostic) {
+            await report("extracting", 30, extractionResult.diagnostic.message, {
+                diagnostic: extractionResult.diagnostic,
+            })
         }
 
         const normalizedTranscript = extractionResult.transcript
