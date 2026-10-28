@@ -11,7 +11,11 @@ export async function GET(req: Request) {
             )
         }
 
-        const conversations = await listConversations()
+        const url = new URL(req.url, "http://localhost")
+        const typeParam = url.searchParams.get("type")
+        const type = typeParam === "youtube" ? "youtube" : typeParam === "chat" ? "chat" : undefined
+
+        const conversations = await listConversations(type)
         return Response.json(conversations)
     } catch (error: unknown) {
         console.error("Error in GET /api/conversations:", error)

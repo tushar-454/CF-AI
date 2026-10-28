@@ -39,6 +39,11 @@
             "name": "pdf-processing-workflow",
             "binding": "PDF_WORKFLOW",
             "class_name": "PdfProcessingWorkflow"
+        },
+        {
+            "name": "youtube-processing-workflow",
+            "binding": "YOUTUBE_WORKFLOW",
+            "class_name": "YoutubeProcessingWorkflow"
         }
     ],
     "durable_objects": {

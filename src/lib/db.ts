@@ -1,5 +1,14 @@
 import { env } from "cloudflare:workers"
-import type { AppEnv, Conversation, D1DatabaseBinding, DocumentItem, Message } from "./types"
+import type {
+    AppEnv,
+    Conversation,
+    D1DatabaseBinding,
+    DocumentItem,
+    Message,
+    YoutubeChunk,
+    YoutubeVideoItem,
+    YoutubeVideoStage,
+} from "./types"
 
 export class DatabaseBindingError extends Error {
     constructor(
@@ -19,17 +28,44 @@ export function getDb(override?: unknown): D1DatabaseBinding {
     return db
 }
 
-export async function listConversations(dbOverride?: unknown): Promise<Conversation[]> {
+export async function listConversations(
+    type?: "chat" | "youtube",
+    dbOverride?: unknown
+): Promise<Conversation[]> {
     const db = getDb(dbOverride)
     try {
+        if (type === "youtube") {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, title, model, type, video_id, created_at, updated_at FROM conversations WHERE type = 'youtube' ORDER BY updated_at DESC"
+                )
+                .all<Conversation>()
+            return results || []
+        } else if (type === "chat") {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, title, model, type, video_id, created_at, updated_at FROM conversations WHERE type != 'youtube' OR type IS NULL ORDER BY updated_at DESC"
+                )
+                .all<Conversation>()
+            return results || []
+        }
+
         const { results } = await db
             .prepare(
-                "SELECT id, title, model, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+                "SELECT id, title, model, type, video_id, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
             )
             .all<Conversation>()
         return results || []
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such column")) {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, title, model, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+                )
+                .all<Conversation>()
+            return results || []
+        }
         if (msg.includes("no such table") || msg.includes("REPLACE_WITH_D1_ID")) {
             throw new DatabaseBindingError(
                 "D1 database tables are not initialized or database ID is a placeholder. Please run migrations."
@@ -44,28 +80,68 @@ export async function getConversation(
     dbOverride?: unknown
 ): Promise<Conversation | null> {
     const db = getDb(dbOverride)
-    const conv = await db
-        .prepare("SELECT id, title, model, created_at, updated_at FROM conversations WHERE id = ?")
-        .bind(id)
-        .first<Conversation>()
-    return conv || null
+    try {
+        const conv = await db
+            .prepare(
+                "SELECT id, title, model, type, video_id, created_at, updated_at FROM conversations WHERE id = ?"
+            )
+            .bind(id)
+            .first<Conversation>()
+        return conv || null
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such column")) {
+            const conv = await db
+                .prepare(
+                    "SELECT id, title, model, created_at, updated_at FROM conversations WHERE id = ?"
+                )
+                .bind(id)
+                .first<Conversation>()
+            return conv || null
+        }
+        throw err
+    }
 }
 
 export async function createConversation(
     id: string,
     title: string,
     model: string,
+    type: "chat" | "youtube" = "chat",
+    videoId?: string | null,
     dbOverride?: unknown
 ): Promise<Conversation> {
     const db = getDb(dbOverride)
     const now = Date.now()
-    await db
-        .prepare(
-            "INSERT INTO conversations (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind(id, title, model, now, now)
-        .run()
-    return { id, title, model, created_at: now, updated_at: now }
+    try {
+        await db
+            .prepare(
+                "INSERT INTO conversations (id, title, model, type, video_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(id, title, model, type, videoId || null, now, now)
+            .run()
+        return {
+            id,
+            title,
+            model,
+            type,
+            video_id: videoId || null,
+            created_at: now,
+            updated_at: now,
+        }
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such column")) {
+            await db
+                .prepare(
+                    "INSERT INTO conversations (id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+                )
+                .bind(id, title, model, now, now)
+                .run()
+            return { id, title, model, created_at: now, updated_at: now }
+        }
+        throw err
+    }
 }
 
 export async function updateConversationTitle(
@@ -111,6 +187,7 @@ interface RawDbMessage {
     model?: string | null
     effort?: Message["effort"] | null
     attachments?: string | null
+    citations?: string | null
     created_at: number
 }
 
@@ -120,17 +197,37 @@ export async function getMessages(
     dbOverride?: unknown
 ): Promise<Message[]> {
     const db = getDb(dbOverride)
-    const { results } = await db
-        .prepare(
-            "SELECT id, conversation_id, role, content, model, effort, attachments, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ?"
-        )
-        .bind(conversationId, limit)
-        .all<RawDbMessage>()
+    try {
+        const { results } = await db
+            .prepare(
+                "SELECT id, conversation_id, role, content, model, effort, attachments, citations, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ?"
+            )
+            .bind(conversationId, limit)
+            .all<RawDbMessage>()
 
-    return (results || []).map((row) => ({
-        ...row,
-        attachments: row.attachments ? JSON.parse(row.attachments) : null,
-    }))
+        return (results || []).map((row) => ({
+            ...row,
+            attachments: row.attachments ? JSON.parse(row.attachments) : null,
+            citations: row.citations ? JSON.parse(row.citations) : null,
+        }))
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such column")) {
+            const { results } = await db
+                .prepare(
+                    "SELECT id, conversation_id, role, content, model, effort, attachments, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT ?"
+                )
+                .bind(conversationId, limit)
+                .all<RawDbMessage>()
+
+            return (results || []).map((row) => ({
+                ...row,
+                attachments: row.attachments ? JSON.parse(row.attachments) : null,
+                citations: null,
+            }))
+        }
+        throw err
+    }
 }
 
 export async function createMessage(
@@ -140,22 +237,47 @@ export async function createMessage(
     const db = getDb(dbOverride)
     const now = msg.created_at || Date.now()
     const attachmentsJson = msg.attachments ? JSON.stringify(msg.attachments) : null
+    const citationsJson = msg.citations ? JSON.stringify(msg.citations) : null
 
-    await db
-        .prepare(
-            "INSERT INTO messages (id, conversation_id, role, content, model, effort, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(
-            msg.id,
-            msg.conversation_id,
-            msg.role,
-            msg.content,
-            msg.model || null,
-            msg.effort || null,
-            attachmentsJson,
-            now
-        )
-        .run()
+    try {
+        await db
+            .prepare(
+                "INSERT INTO messages (id, conversation_id, role, content, model, effort, attachments, citations, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(
+                msg.id,
+                msg.conversation_id,
+                msg.role,
+                msg.content,
+                msg.model || null,
+                msg.effort || null,
+                attachmentsJson,
+                citationsJson,
+                now
+            )
+            .run()
+    } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err)
+        if (errMsg.includes("no such column") || errMsg.includes("has no column named citations")) {
+            await db
+                .prepare(
+                    "INSERT INTO messages (id, conversation_id, role, content, model, effort, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(
+                    msg.id,
+                    msg.conversation_id,
+                    msg.role,
+                    msg.content,
+                    msg.model || null,
+                    msg.effort || null,
+                    attachmentsJson,
+                    now
+                )
+                .run()
+        } else {
+            throw err
+        }
+    }
 
     await touchConversation(msg.conversation_id, db)
 
@@ -633,5 +755,226 @@ export async function getUsageMetrics(dbOverride?: unknown): Promise<DailyUsageS
         allTimeMessages,
         allTimeDocuments,
         byModel,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// YouTube Video Knowledge Base Database Access
+// ---------------------------------------------------------------------------
+
+export async function getYoutubeVideo(
+    id: string,
+    dbOverride?: unknown
+): Promise<YoutubeVideoItem | null> {
+    const db = getDb(dbOverride)
+    try {
+        const video = await db
+            .prepare(
+                "SELECT id, title, url, channel_title, duration, thumbnail_url, transcript_lang, transcript_source, transcript_version, status, stage, progress, error_message, embedding_model, chunk_count, created_at, updated_at, completed_at FROM youtube_videos WHERE id = ?"
+            )
+            .bind(id)
+            .first<YoutubeVideoItem>()
+        return video || null
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such table")) {
+            return null
+        }
+        throw err
+    }
+}
+
+export async function createYoutubeVideo(
+    video: YoutubeVideoItem,
+    dbOverride?: unknown
+): Promise<void> {
+    const db = getDb(dbOverride)
+    await db
+        .prepare(
+            `INSERT INTO youtube_videos (
+                id, title, url, channel_title, duration, thumbnail_url,
+                transcript_lang, transcript_source, transcript_version,
+                status, stage, progress, error_message, embedding_model,
+                chunk_count, created_at, updated_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                url = excluded.url,
+                status = excluded.status,
+                stage = excluded.stage,
+                progress = excluded.progress,
+                error_message = excluded.error_message,
+                updated_at = excluded.updated_at`
+        )
+        .bind(
+            video.id,
+            video.title,
+            video.url,
+            video.channel_title || null,
+            video.duration || 0,
+            video.thumbnail_url || null,
+            video.transcript_lang || null,
+            video.transcript_source || null,
+            video.transcript_version || 1,
+            video.status,
+            video.stage || "validating",
+            video.progress ?? 0,
+            video.error_message || null,
+            video.embedding_model,
+            video.chunk_count ?? 0,
+            video.created_at,
+            video.updated_at,
+            video.completed_at || null
+        )
+        .run()
+}
+
+export async function updateYoutubeVideoProgress(
+    id: string,
+    updates: Partial<YoutubeVideoItem>,
+    dbOverride?: unknown
+): Promise<void> {
+    const db = getDb(dbOverride)
+    const setClauses: string[] = []
+    const values: unknown[] = []
+
+    if (updates.title !== undefined) {
+        setClauses.push("title = ?")
+        values.push(updates.title)
+    }
+    if (updates.duration !== undefined) {
+        setClauses.push("duration = ?")
+        values.push(updates.duration)
+    }
+    if (updates.channel_title !== undefined) {
+        setClauses.push("channel_title = ?")
+        values.push(updates.channel_title)
+    }
+    if (updates.thumbnail_url !== undefined) {
+        setClauses.push("thumbnail_url = ?")
+        values.push(updates.thumbnail_url)
+    }
+    if (updates.transcript_lang !== undefined) {
+        setClauses.push("transcript_lang = ?")
+        values.push(updates.transcript_lang)
+    }
+    if (updates.transcript_source !== undefined) {
+        setClauses.push("transcript_source = ?")
+        values.push(updates.transcript_source)
+    }
+    if (updates.transcript_version !== undefined) {
+        setClauses.push("transcript_version = ?")
+        values.push(updates.transcript_version)
+    }
+    if (updates.status !== undefined) {
+        setClauses.push("status = ?")
+        values.push(updates.status)
+    }
+    if (updates.stage !== undefined) {
+        setClauses.push("stage = ?")
+        values.push(updates.stage)
+    }
+    if (updates.progress !== undefined) {
+        setClauses.push("progress = ?")
+        values.push(updates.progress)
+    }
+    if (updates.error_message !== undefined) {
+        setClauses.push("error_message = ?")
+        values.push(updates.error_message)
+    }
+    if (updates.chunk_count !== undefined) {
+        setClauses.push("chunk_count = ?")
+        values.push(updates.chunk_count)
+    }
+    if (updates.completed_at !== undefined) {
+        setClauses.push("completed_at = ?")
+        values.push(updates.completed_at)
+    }
+
+    setClauses.push("updated_at = ?")
+    values.push(Date.now())
+
+    values.push(id)
+
+    await db
+        .prepare(`UPDATE youtube_videos SET ${setClauses.join(", ")} WHERE id = ?`)
+        .bind(...values)
+        .run()
+}
+
+export async function failYoutubeVideo(
+    id: string,
+    errorMessage: string,
+    stage: YoutubeVideoStage = "failed",
+    dbOverride?: unknown
+): Promise<void> {
+    await updateYoutubeVideoProgress(
+        id,
+        {
+            status: "failed",
+            stage,
+            error_message: errorMessage,
+            completed_at: Date.now(),
+        },
+        dbOverride
+    )
+}
+
+export async function getYoutubeChunks(
+    videoId: string,
+    dbOverride?: unknown
+): Promise<YoutubeChunk[]> {
+    const db = getDb(dbOverride)
+    try {
+        const { results } = await db
+            .prepare(
+                "SELECT id, video_id as videoId, chunk_index as chunkIndex, start_seconds as startSeconds, end_seconds as endSeconds, text FROM youtube_chunks WHERE video_id = ? ORDER BY chunk_index ASC"
+            )
+            .bind(videoId)
+            .all<YoutubeChunk>()
+        return results || []
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (msg.includes("no such table")) {
+            return []
+        }
+        throw err
+    }
+}
+
+export async function saveYoutubeChunks(
+    videoId: string,
+    chunks: YoutubeChunk[],
+    dbOverride?: unknown
+): Promise<void> {
+    if (!chunks || chunks.length === 0) return
+    const db = getDb(dbOverride)
+    const now = Date.now()
+
+    // Delete existing chunks for idempotent upsert
+    try {
+        await db.prepare("DELETE FROM youtube_chunks WHERE video_id = ?").bind(videoId).run()
+    } catch {}
+
+    const statements = chunks.map((chunk) =>
+        db
+            .prepare(
+                "INSERT INTO youtube_chunks (id, video_id, chunk_index, start_seconds, end_seconds, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(
+                chunk.id,
+                videoId,
+                chunk.chunkIndex,
+                chunk.startSeconds,
+                chunk.endSeconds,
+                chunk.text,
+                now
+            )
+    )
+
+    // Batch execute
+    const batchSize = 50
+    for (let i = 0; i < statements.length; i += batchSize) {
+        await db.batch(statements.slice(i, i + batchSize))
     }
 }

@@ -40,12 +40,15 @@ export interface Message {
     attachments?: Attachment[] | null
     created_at: number
     reasoning?: string | null
+    citations?: import("./youtube-types").Citation[] | null
 }
 
 export interface Conversation {
     id: string
     title: string
     model: string
+    type?: "chat" | "youtube"
+    video_id?: string | null
     created_at: number
     updated_at: number
     messages?: Message[]
@@ -225,10 +228,12 @@ export interface AppEnv {
     FILES?: R2BucketBinding
     VECTORIZE?: VectorizeIndexBinding
     PDF_WORKFLOW?: WorkflowInstanceBinding
+    YOUTUBE_WORKFLOW?: WorkflowInstanceBinding
     DOCUMENT_PROGRESS_DO?: DurableObjectNamespaceBinding
     ASSETS?: unknown
     IMAGES?: unknown
     APP_PIN?: string
+    SUPADATA_API_KEY?: string
     R2_BUCKET?: string
     R2_ACCESS_KEY_ID?: string
     R2_SECRET_ACCESS_KEY?: string
@@ -237,3 +242,5 @@ export interface AppEnv {
     CLOUDFLARE_ACCOUNT_ID?: string
     CLOUDFLARE_API_TOKEN?: string
 }
+
+export * from "./youtube-types"

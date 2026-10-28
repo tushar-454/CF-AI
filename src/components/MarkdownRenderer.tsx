@@ -3,14 +3,27 @@
 import React, { useMemo } from "react"
 import { marked } from "marked"
 
+import { parseTimestamp } from "@/lib/youtube-chunker"
+
 interface MarkdownRendererProps {
     content: string
+    onSeek?: (seconds: number) => void
 }
 
-export function MarkdownRenderer({ content }: MarkdownRendererProps) {
+export const MarkdownRenderer = React.memo(function MarkdownRenderer({
+    content,
+    onSeek,
+}: MarkdownRendererProps) {
     const parsedHtml = useMemo(() => {
         try {
-            return marked.parse(content, { async: false }) as string
+            // Transform timestamp notations like [02:15] or [01:23 - 02:00] into clickable citation badges
+            const processed = content.replace(
+                /\[(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*-\s*\d{1,2}:\d{2}(?::\d{2})?)?\]/g,
+                (match, p1) => {
+                    return `<button type="button" class="timestamp-citation inline-flex items-center gap-1 font-mono text-[11px] px-1.5 py-0.5 rounded bg-[var(--badge-bg)] text-[var(--accent)] hover:underline cursor-pointer" data-seek="${p1}">▶ ${match.slice(1, -1)}</button>`
+                }
+            )
+            return marked.parse(processed, { async: false }) as string
         } catch {
             return content
         }
@@ -22,6 +35,23 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
             dangerouslySetInnerHTML={{ __html: parsedHtml }}
             onClick={(e) => {
                 const target = e.target as HTMLElement
+
+                // Handle timestamp citation seek clicks
+                const timestampBtn = target.closest(
+                    "button.timestamp-citation"
+                ) as HTMLButtonElement | null
+                if (timestampBtn && onSeek) {
+                    const seekVal = timestampBtn.getAttribute("data-seek")
+                    if (seekVal) {
+                        const seconds = parseTimestamp(seekVal)
+                        if (seconds !== null) {
+                            onSeek(seconds)
+                            return
+                        }
+                    }
+                }
+
+                // Handle code copy button clicks
                 const copyBtn = target.closest("button.copy-code-btn") as HTMLButtonElement | null
                 if (copyBtn) {
                     const rawCode = copyBtn.getAttribute("data-code")
@@ -40,7 +70,7 @@ export function MarkdownRenderer({ content }: MarkdownRendererProps) {
             }}
         />
     )
-}
+})
 
 if (typeof window !== "undefined") {
     const renderer = new marked.Renderer()

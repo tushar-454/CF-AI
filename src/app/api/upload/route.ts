@@ -226,10 +226,14 @@ export async function POST(req: Request) {
                 })
                 const chunks = chunkText(extractedText)
                 if (chunks.length > 0) {
-                    await r2.put(`intermediates/${documentId}/chunks.json`, JSON.stringify(chunks), {
-                        httpMetadata: { contentType: "application/json" },
-                        customMetadata: { documentId, chunkCount: String(chunks.length) },
-                    })
+                    await r2.put(
+                        `intermediates/${documentId}/chunks.json`,
+                        JSON.stringify(chunks),
+                        {
+                            httpMetadata: { contentType: "application/json" },
+                            customMetadata: { documentId, chunkCount: String(chunks.length) },
+                        }
+                    )
                 }
             } catch (r2Err) {
                 console.warn("Failed to store text document chunks in R2:", r2Err)

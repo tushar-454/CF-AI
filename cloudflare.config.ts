@@ -14,6 +14,7 @@ export default defineConfig({
         },
         exports: {
             PdfProcessingWorkflow: exports.workflow({ name: "pdf-processing-workflow" }),
+            YoutubeProcessingWorkflow: exports.workflow({ name: "youtube-processing-workflow" }),
             DocumentProgressDO: exports.durableObject({ storage: "sqlite" }),
         },
         env: {
@@ -34,11 +35,16 @@ export default defineConfig({
             VECTORIZE: bindings.vectorize({
                 name: "chatbot-rag-index",
             }),
-            // Cloudflare Workflow binding
+            // Cloudflare Workflow bindings
             PDF_WORKFLOW: bindings.workflow({
                 name: "pdf-processing-workflow",
                 worker: "cf-ai",
                 exportName: "PdfProcessingWorkflow",
+            }),
+            YOUTUBE_WORKFLOW: bindings.workflow({
+                name: "youtube-processing-workflow",
+                worker: "cf-ai",
+                exportName: "YoutubeProcessingWorkflow",
             }),
             // Durable Object binding for SSE progress
             DOCUMENT_PROGRESS_DO: bindings.durableObject({
@@ -47,6 +53,8 @@ export default defineConfig({
             }),
             // Application security PIN secret binding
             APP_PIN: bindings.secret(),
+            // Supadata API secret binding
+            SUPADATA_API_KEY: bindings.secret(),
         },
     }),
 })

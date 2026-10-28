@@ -688,7 +688,9 @@ export function ChatContainer() {
                                 const newChatDocs = prev["new_chat"] || []
                                 if (newChatDocs.length > 0) {
                                     const existing = prev[event.conversationId] || []
-                                    const merged = Array.from(new Set([...existing, ...newChatDocs]))
+                                    const merged = Array.from(
+                                        new Set([...existing, ...newChatDocs])
+                                    )
                                     return {
                                         ...prev,
                                         [event.conversationId]: merged,

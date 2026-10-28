@@ -12,6 +12,7 @@ import {
     LinkIcon,
     LockIcon,
     MoonIcon,
+    PlayIcon,
     PlusIcon,
     SearchIcon,
     SunIcon,
@@ -265,6 +266,39 @@ export function Sidebar({
                         </button>
                     </div>
                 </div>
+
+                {/* Workspace Navigation Switcher */}
+                {(() => {
+                    const isYouTubePage =
+                        typeof window !== "undefined" &&
+                        window.location.pathname.startsWith("/youtube")
+                    return (
+                        <div className="flex items-center p-0.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] mb-3 text-xs font-medium">
+                            <a
+                                href="/"
+                                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-center transition-all ${
+                                    !isYouTubePage
+                                        ? "bg-[var(--surface-bg)] text-[var(--accent)] font-semibold shadow-xs"
+                                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                }`}
+                            >
+                                <BookOpenIcon size={13} />
+                                <span>Docs</span>
+                            </a>
+                            <a
+                                href="/youtube"
+                                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-center transition-all ${
+                                    isYouTubePage
+                                        ? "bg-[var(--surface-bg)] text-red-600 dark:text-red-400 font-semibold shadow-xs"
+                                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                                }`}
+                            >
+                                <PlayIcon size={13} />
+                                <span>YouTube</span>
+                            </a>
+                        </div>
+                    )
+                })()}
 
                 {/* New Chat Button */}
                 <button
