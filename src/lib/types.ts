@@ -130,6 +130,10 @@ export interface ChatRequestBody {
 
 export interface WorkersAi {
     run: (model: string, inputs: Record<string, unknown> | unknown) => Promise<unknown>
+    toMarkdown?: (
+        buf: ArrayBuffer,
+        opts?: unknown
+    ) => Promise<{ content?: string; text?: string }>
 }
 
 export interface D1PreparedStatement {

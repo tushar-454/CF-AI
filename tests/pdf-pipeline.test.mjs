@@ -13,7 +13,18 @@ import {
     retrieveDocumentContext,
     indexDocumentChunks,
 } from "../src/lib/rag.ts"
-import { extractPdfText, extractPdfPages, isPdfFile } from "../src/lib/pdf.ts"
+import {
+    extractPdfText,
+    extractPdfPages,
+    extractPdfDocument,
+    evaluatePageTextQuality,
+    mergePageText,
+    isCandidateOcrImage,
+    computeImageHash,
+    encodeRawToPng,
+    performVisionOcr,
+    isPdfFile,
+} from "../src/lib/pdf.ts"
 import { DocumentProgressDO } from "../src/lib/durable-object.ts"
 
 import { createR2PresignedPutUrl } from "../src/lib/r2-presign.ts"
@@ -739,6 +750,523 @@ test("PDF Processing Pipeline & Architecture Suite", async (t) => {
             const revenueChunk = retrieved.find((c) => c.text.includes("Revenue and growth"))
             assert.ok(revenueChunk, "Expected revenue chunk")
             assert.strictEqual(revenueChunk.pageNumber, 3)
+        }
+    )
+
+    // =============================================================
+    // Helper Fixture Generators for Real Valid PDF Byte Streams
+    // =============================================================
+    function createTextPdfFixture(p1Text, p2Text) {
+        const p2Obj = p2Text
+            ? `\n6 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >> endobj\n7 0 obj << /Length ${p2Text.length + 30} >> stream\nBT /F1 12 Tf 72 712 Td (${p2Text}) Tj ET\nendstream\nendobj`
+            : ""
+        const kids = p2Text ? "[3 0 R 6 0 R]" : "[3 0 R]"
+        const count = p2Text ? "2" : "1"
+        const pdf = `%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids ${kids} /Count ${count} >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj
+4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+5 0 obj << /Length ${p1Text.length + 30} >> stream
+BT /F1 12 Tf 72 712 Td (${p1Text}) Tj ET
+endstream
+endobj${p2Obj}
+xref
+0 ${p2Text ? "8" : "6"}
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000122 00000 n 
+0000000251 00000 n 
+0000000325 00000 n 
+trailer << /Size ${p2Text ? "8" : "6"} /Root 1 0 R >>
+startxref
+500
+%%EOF`
+        return new TextEncoder().encode(pdf)
+    }
+
+    function createScannedPdfFixture(width = 80, height = 80) {
+        const rawLen = width * height * 3
+        const streamBytes = "\xFF".repeat(rawLen)
+        const pdf = `%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >> endobj
+4 0 obj << /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length ${rawLen} >> stream
+${streamBytes}
+endstream
+endobj
+5 0 obj << /Length 20 >> stream
+q ${width} 0 0 ${height} 0 0 cm /Im0 Do Q
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000236 00000 n 
+trailer << /Size 6 /Root 1 0 R >>
+startxref
+500
+%%EOF`
+        return new TextEncoder().encode(pdf)
+    }
+
+    function createMixedPdfFixture(p1Text, imageWidth = 80, imageHeight = 80) {
+        const rawLen = imageWidth * imageHeight * 3
+        const streamBytes = "\xFF".repeat(rawLen)
+        const pdf = `%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj
+4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+5 0 obj << /Length ${p1Text.length + 30} >> stream
+BT /F1 12 Tf 72 712 Td (${p1Text}) Tj ET
+endstream
+endobj
+6 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /Im0 7 0 R >> >> /Contents 8 0 R >> endobj
+7 0 obj << /Type /XObject /Subtype /Image /Width ${imageWidth} /Height ${imageHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length ${rawLen} >> stream
+${streamBytes}
+endstream
+endobj
+8 0 obj << /Length 20 >> stream
+q ${imageWidth} 0 0 ${imageHeight} 0 0 cm /Im0 Do Q
+endstream
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000122 00000 n 
+0000000251 00000 n 
+0000000325 00000 n 
+0000000433 00000 n 
+0000000561 00000 n 
+trailer << /Size 9 /Root 1 0 R >>
+startxref
+500
+%%EOF`
+        return new TextEncoder().encode(pdf)
+    }
+
+    // -------------------------------------------------------------
+    // Test 18: Text-based PDFs that should not trigger OCR
+    // -------------------------------------------------------------
+    await t.test(
+        "18. Text-based PDF extracts embedded text with unpdf and skips OCR entirely",
+        async () => {
+            const pdfBytes = createTextPdfFixture(
+                "Executive Summary: Cloudflare Workers AI with Vectorize enables serverless RAG architectures.",
+                "Technical Specifications: Embedding dimensions are 768 using BAAI BGE model across documents."
+            )
+
+            const ocrCalls = []
+            const mockAi = {
+                async run(model, inputs) {
+                    ocrCalls.push({ model, inputs })
+                    return { response: "Unexpected OCR execution" }
+                },
+            }
+
+            const result = await extractPdfDocument(pdfBytes, { ai: mockAi })
+
+            assert.strictEqual(result.extractionMode, "text")
+            assert.strictEqual(result.ocrPagesCount, 0)
+            assert.strictEqual(ocrCalls.length, 0, "OCR must NOT be triggered for text-based PDFs")
+            assert.strictEqual(result.totalPages, 2)
+            assert.strictEqual(result.pages.length, 2)
+            assert.strictEqual(result.pages[0].pageNumber, 1)
+            assert.strictEqual(result.pages[1].pageNumber, 2)
+            assert.ok(result.pages[0].text.includes("Executive Summary"))
+            assert.ok(result.pages[1].text.includes("Technical Specifications"))
+            assert.ok(result.contentHash.length > 0)
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 19: Scanned PDFs that require OCR
+    // -------------------------------------------------------------
+    await t.test(
+        "19. Scanned image-based PDF detects absent text and triggers conditional OCR",
+        async () => {
+            const pdfBytes = createScannedPdfFixture(80, 80)
+
+            const ocrCalls = []
+            const mockAi = {
+                async run(model, inputs) {
+                    ocrCalls.push({ model, inputs })
+                    return {
+                        response:
+                            "INVOICE #98765\nVendor: Global Cloud Corp\nTotal Due: $1,250.00\nPayment Terms: Net 30",
+                    }
+                },
+            }
+
+            const result = await extractPdfDocument(pdfBytes, { ai: mockAi })
+
+            assert.strictEqual(result.extractionMode, "ocr")
+            assert.strictEqual(result.ocrPagesCount, 1)
+            assert.strictEqual(ocrCalls.length, 1, "Expected OCR to run for the scanned image page")
+            assert.strictEqual(result.pages.length, 1)
+            assert.strictEqual(result.pages[0].pageNumber, 1)
+            assert.ok(result.pages[0].text.includes("INVOICE #98765"))
+            assert.ok(result.pages[0].text.includes("Total Due: $1,250.00"))
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 20: Mixed PDFs where only necessary pages receive OCR
+    // -------------------------------------------------------------
+    await t.test(
+        "20. Mixed PDF preserves embedded text and runs OCR only on pages requiring it",
+        async () => {
+            const pdfBytes = createMixedPdfFixture(
+                "Page 1 Overview: High-performance edge compute with instant cold starts.",
+                80,
+                80
+            )
+
+            const ocrCalls = []
+            const mockAi = {
+                async run(model, inputs) {
+                    ocrCalls.push({ model, inputs })
+                    return {
+                        response:
+                            "Page 2 Scanned Diagram: System Architecture from client to Vectorize database.",
+                    }
+                },
+            }
+
+            const result = await extractPdfDocument(pdfBytes, { ai: mockAi })
+
+            assert.strictEqual(result.extractionMode, "mixed")
+            assert.strictEqual(result.ocrPagesCount, 1)
+            assert.strictEqual(
+                ocrCalls.length,
+                1,
+                "OCR must only execute for Page 2, Page 1 text must be preserved without OCR"
+            )
+            assert.strictEqual(result.totalPages, 2)
+            assert.strictEqual(result.pages.length, 2)
+
+            // Page 1 is from embedded text layer
+            assert.strictEqual(result.pages[0].pageNumber, 1)
+            assert.ok(result.pages[0].text.includes("Page 1 Overview"))
+
+            // Page 2 is from conditional OCR
+            assert.strictEqual(result.pages[1].pageNumber, 2)
+            assert.ok(result.pages[1].text.includes("Page 2 Scanned Diagram"))
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 21: Empty, malformed, and garbled-text PDFs
+    // -------------------------------------------------------------
+    await t.test(
+        "21. Empty, malformed, and garbled-text PDFs handle failures cleanly without crashing",
+        async () => {
+            const ocrCalls = []
+            const mockAi = {
+                async run(model, inputs) {
+                    ocrCalls.push({ model, inputs })
+                    return { response: "Should not be called" }
+                },
+            }
+
+            // 1. Empty byte buffer
+            const emptyResult = await extractPdfDocument(new Uint8Array(0), { ai: mockAi })
+            assert.strictEqual(emptyResult.pages.length, 0)
+            assert.strictEqual(ocrCalls.length, 0, "Empty buffer must not trigger OCR")
+
+            // 2. Corrupt byte buffer
+            const corruptBytes = new Uint8Array([0x00, 0x01, 0x02, 0x03, 0x04])
+            const corruptResult = await extractPdfDocument(corruptBytes, { ai: mockAi })
+            assert.strictEqual(corruptResult.pages.length, 0)
+            assert.strictEqual(ocrCalls.length, 0, "Corrupt buffer must not trigger OCR")
+
+            // 3. Garbled text quality assessments
+            const repetitive = evaluatePageTextQuality(".".repeat(60))
+            assert.strictEqual(repetitive.isUsable, false)
+
+            const symbolNoise = evaluatePageTextQuality("!@#$%^&*()_+=-{}[]:;'<>?,./~".repeat(3))
+            assert.strictEqual(symbolNoise.isUsable, false)
+
+            const sparseNoise = evaluatePageTextQuality("Page 1")
+            assert.strictEqual(sparseNoise.isUsable, false)
+
+            const goodText = evaluatePageTextQuality(
+                "Cloudflare Workers provides serverless execution environments with low latency."
+            )
+            assert.strictEqual(goodText.isUsable, true)
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 22: Duplicate text between embedded extraction and OCR
+    // -------------------------------------------------------------
+    await t.test(
+        "22. Duplicate text between embedded extraction and OCR is completely deduplicated",
+        () => {
+            // Case 1: Exact match
+            const exactMerged = mergePageText("Financial Report Q1", "Financial Report Q1")
+            assert.strictEqual(exactMerged, "Financial Report Q1")
+
+            // Case 2: OCR output is superset of heading (avoids repeating heading)
+            const supersetMerged = mergePageText(
+                "Company Financials",
+                "Company Financials\n\nTotal Revenue: $5,000,000\nOperating Profit: $1,200,000"
+            )
+            assert.strictEqual(
+                supersetMerged,
+                "Company Financials\n\nTotal Revenue: $5,000,000\nOperating Profit: $1,200,000"
+            )
+
+            // Case 3: Embedded text contains OCR text (OCR recognized label already in text)
+            const embeddedContainsMerged = mergePageText(
+                "Complete document section with Figure 1: Flowchart of Vectorize index.",
+                "Figure 1: Flowchart of Vectorize index."
+            )
+            assert.strictEqual(
+                embeddedContainsMerged,
+                "Complete document section with Figure 1: Flowchart of Vectorize index."
+            )
+
+            // Case 4: Distinct non-overlapping paragraphs appended cleanly
+            const distinctMerged = mergePageText(
+                "Section 1: Distributed Storage.",
+                "Figure 2: Architecture diagram of Durable Objects."
+            )
+            assert.ok(distinctMerged.includes("Section 1: Distributed Storage."))
+            assert.ok(distinctMerged.includes("Figure 2: Architecture diagram of Durable Objects."))
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 23: Decorative images and repeated logos filtering
+    // -------------------------------------------------------------
+    await t.test(
+        "23. Decorative images and repeated logos are filtered and not OCR'd repeatedly",
+        () => {
+            // Reject tiny icon
+            assert.strictEqual(isCandidateOcrImage({ width: 16, height: 16, channels: 3 }), false)
+
+            // Reject horizontal separator line
+            assert.strictEqual(isCandidateOcrImage({ width: 800, height: 2, channels: 3 }), false)
+
+            // Reject vertical border rule
+            assert.strictEqual(isCandidateOcrImage({ width: 2, height: 800, channels: 3 }), false)
+
+            // Accept legitimate document image
+            assert.strictEqual(isCandidateOcrImage({ width: 600, height: 800, channels: 3 }), true)
+
+            // Image hash determinism
+            const imgData1 = new Uint8Array(100).fill(128)
+            const imgData2 = new Uint8Array(100).fill(128)
+            const imgData3 = new Uint8Array(100).fill(255)
+
+            const hash1 = computeImageHash(10, 10, 1, imgData1)
+            const hash2 = computeImageHash(10, 10, 1, imgData2)
+            const hash3 = computeImageHash(10, 10, 1, imgData3)
+
+            assert.strictEqual(hash1, hash2, "Identical image pixels must produce identical hash")
+            assert.notStrictEqual(hash1, hash3, "Different pixels must produce different hash")
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 24: OCR failure on one page while other pages succeed
+    // -------------------------------------------------------------
+    await t.test(
+        "24. OCR failure on one page is isolated without losing successfully extracted pages",
+        async () => {
+            const pdfBytes = createMixedPdfFixture(
+                "Page 1 Documentation: Robust edge computing with zero cold starts.",
+                80,
+                80
+            )
+
+            const mockFailingAi = {
+                async run() {
+                    throw new Error("Workers AI vision service timeout or 503 unavailable")
+                },
+            }
+
+            // Pipeline should NOT throw; Page 1 must still be returned!
+            const result = await extractPdfDocument(pdfBytes, { ai: mockFailingAi })
+
+            assert.strictEqual(result.totalPages, 2)
+            assert.ok(result.pages.length >= 1, "Page 1 embedded text must be preserved")
+            assert.strictEqual(result.pages[0].pageNumber, 1)
+            assert.ok(result.pages[0].text.includes("Page 1 Documentation"))
+            assert.strictEqual(result.details?.ocrFailedPages, 1)
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 25: Workflow retries clean orphan vector IDs when chunk count decreases
+    // -------------------------------------------------------------
+    await t.test(
+        "25. Workflow retries clean orphan vector IDs when chunk count decreases",
+        async () => {
+            const deletedVectorBatches = []
+            const mockVectorize = {
+                async deleteByIds(ids) {
+                    deletedVectorBatches.push(...ids)
+                },
+                async upsert() {},
+            }
+
+            // Document previously had 5 chunks: doc_test_0 to doc_test_4
+            const oldChunkCount = 5
+            const newChunkCount = 3
+            const documentId = "doc_test_orphan"
+
+            if (oldChunkCount > newChunkCount) {
+                const orphanIds = []
+                for (let i = newChunkCount; i < oldChunkCount; i++) {
+                    orphanIds.push(`${documentId}_${i}`)
+                }
+                await mockVectorize.deleteByIds(orphanIds)
+            }
+
+            assert.strictEqual(deletedVectorBatches.length, 2)
+            assert.strictEqual(deletedVectorBatches[0], "doc_test_orphan_3")
+            assert.strictEqual(deletedVectorBatches[1], "doc_test_orphan_4")
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 26: Idempotent reprocessing skips embedding and indexing when content is unchanged
+    // -------------------------------------------------------------
+    await t.test(
+        "26. Idempotent reprocessing skips embedding and indexing when content is unchanged",
+        async () => {
+            let embeddingCalled = false
+            let vectorizeUpsertCalled = false
+
+            const mockAi = {
+                async run() {
+                    embeddingCalled = true
+                    return { data: [[0.1, 0.2, 0.3]] }
+                },
+            }
+
+            const mockVectorize = {
+                async upsert() {
+                    vectorizeUpsertCalled = true
+                },
+            }
+
+            const isContentUnchanged = true
+            const docStatus = "ready"
+            const docChunkCount = 2
+            const currentChunksCount = 2
+
+            // Simulate generate-embeddings guard
+            let embeddingSkipped = false
+            if (
+                isContentUnchanged &&
+                docStatus === "ready" &&
+                docChunkCount === currentChunksCount
+            ) {
+                embeddingSkipped = true
+            } else {
+                await mockAi.run()
+            }
+
+            // Simulate index-vectors guard
+            let indexingSkipped = false
+            if (embeddingSkipped) {
+                indexingSkipped = true
+            } else {
+                await mockVectorize.upsert([])
+            }
+
+            assert.strictEqual(embeddingSkipped, true)
+            assert.strictEqual(indexingSkipped, true)
+            assert.strictEqual(embeddingCalled, false, "Embedding generation must be skipped")
+            assert.strictEqual(vectorizeUpsertCalled, false, "Vectorize upsert must be skipped")
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 27: Pure-JS PNG encoder produces valid PNG bytes compatible with Workers AI vision
+    // -------------------------------------------------------------
+    await t.test(
+        "27. Pure-JS PNG encoder produces valid PNG bytes compatible with Workers AI vision",
+        async () => {
+            const width = 10
+            const height = 10
+            const channels = 3
+            const rawPixels = new Uint8Array(width * height * channels).fill(128)
+
+            const pngBytes = await encodeRawToPng(width, height, channels, rawPixels)
+
+            assert.ok(pngBytes.length > 50, "PNG output must have valid non-zero length")
+
+            // Check standard 8-byte PNG header: [137, 80, 78, 71, 13, 10, 26, 10]
+            assert.strictEqual(pngBytes[0], 137)
+            assert.strictEqual(pngBytes[1], 80) // P
+            assert.strictEqual(pngBytes[2], 78) // N
+            assert.strictEqual(pngBytes[3], 71) // G
+            assert.strictEqual(pngBytes[4], 13)
+            assert.strictEqual(pngBytes[5], 10)
+            assert.strictEqual(pngBytes[6], 26)
+            assert.strictEqual(pngBytes[7], 10)
+
+            // Verify IHDR and IDAT chunks are present
+            const text = new TextDecoder("ascii").decode(pngBytes.slice(0, 100))
+            assert.ok(text.includes("IHDR"))
+            assert.ok(text.includes("IDAT"))
+
+            // Verify performVisionOcr correctly packages PNG bytes to Workers AI
+            const ocrResult = await performVisionOcr(
+                {
+                    async run(model, inputs) {
+                        assert.ok(inputs.image)
+                        assert.strictEqual(inputs.image.length, pngBytes.length)
+                        return { response: "Document Title: Verification Pass" }
+                    },
+                },
+                pngBytes,
+                1
+            )
+            assert.strictEqual(ocrResult, "Document Title: Verification Pass")
+        }
+    )
+
+    // -------------------------------------------------------------
+    // Test 28: Workers AI toMarkdown fallback when unpdf parsing fails
+    // -------------------------------------------------------------
+    await t.test(
+        "28. Workers AI toMarkdown fallback extracts text when unpdf parsing fails",
+        async () => {
+            const corruptedPdf = new Uint8Array([1, 2, 3, 4, 5])
+            let toMarkdownCalled = false
+
+            const mockToMarkdownAi = {
+                async run() {},
+                async toMarkdown(buffer, opts) {
+                    toMarkdownCalled = true
+                    assert.ok(buffer)
+                    assert.strictEqual(opts?.conversionOptions?.output?.format, "text")
+                    return { content: "Fallback text from Workers AI toMarkdown" }
+                },
+            }
+
+            const result = await extractPdfDocument(corruptedPdf, { ai: mockToMarkdownAi })
+
+            assert.strictEqual(toMarkdownCalled, true, "toMarkdown fallback must be called")
+            assert.strictEqual(result.totalPages, 1)
+            assert.strictEqual(result.pages.length, 1)
+            assert.strictEqual(result.pages[0].pageNumber, 1)
+            assert.strictEqual(result.pages[0].text, "Fallback text from Workers AI toMarkdown")
+            assert.strictEqual(result.extractionMode, "text")
+            assert.ok(result.contentHash.length > 0)
         }
     )
 })

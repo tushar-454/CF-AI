@@ -1,5 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers"
-import { extractPdfPages } from "./pdf"
+import { extractPdfDocument } from "./pdf"
 import { chunkPages, chunkText, getEmbeddings } from "./rag"
 import { failDocument, getDocument, updateDocumentProgress } from "./db"
 import type {
@@ -97,10 +97,12 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 return { size: obj.size }
             })
 
-            // Step 2: Extract PDF pages and plain text (deterministic: do not retry permanent text extraction failures)
+            // Step 2: Extract PDF pages and plain text with unpdf & conditional OCR
             const extractedTextKey = `intermediates/${documentId}/extracted.txt`
             const pagesKey = `intermediates/${documentId}/pages.json`
-            await step.do("extract-pdf-text", async () => {
+            const metaKey = `intermediates/${documentId}/meta.json`
+
+            const extractionResult = await step.do("extract-pdf-text", async () => {
                 const r2 = this.env.FILES!
                 const obj = await r2.get(r2Key)
                 if (!obj) {
@@ -108,16 +110,59 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 }
 
                 const arrayBuffer = await obj.arrayBuffer()
-                const pages = await extractPdfPages(arrayBuffer, this.env.AI)
+                const extractedDoc = await extractPdfDocument(arrayBuffer, {
+                    ai: this.env.AI,
+                    enableOcr: true,
+                    maxOcrPages: 10,
+                    ocrConcurrency: 2,
+                })
+
+                const { pages, totalPages, extractionMode, ocrPagesCount, contentHash } =
+                    extractedDoc
                 const text = pages.map((p) => p.text).join("\n\n")
 
                 if (!text || !text.trim()) {
                     throw new Error(
-                        `No extractable text layer found in "${fileName}". The PDF may be empty or a scanned image requiring OCR.`
+                        `No extractable text or images found in "${fileName}". The PDF may be empty or corrupted.`
                     )
                 }
 
-                // Save extracted text to R2 to prevent Workflow step state payload limit and provide permanent RAG fallback
+                // Check for idempotent re-processing: has content changed since a previous run?
+                let isContentUnchanged = false
+                try {
+                    const prevMetaObj = await r2.get(metaKey)
+                    if (prevMetaObj) {
+                        const prevRaw = prevMetaObj.text
+                            ? await prevMetaObj.text()
+                            : new TextDecoder().decode(await prevMetaObj.arrayBuffer())
+                        const prevMeta = JSON.parse(prevRaw)
+                        if (
+                            prevMeta.contentHash &&
+                            prevMeta.contentHash === contentHash &&
+                            prevMeta.isIndexed
+                        ) {
+                            isContentUnchanged = true
+                        }
+                    }
+                } catch {}
+
+                // Save extraction metadata for idempotency and auditability
+                const metaPayload = {
+                    documentId,
+                    fileName,
+                    totalPages,
+                    extractionMode,
+                    ocrPagesCount,
+                    contentHash,
+                    isContentUnchanged,
+                    updatedAt: Date.now(),
+                }
+                await r2.put(metaKey, JSON.stringify(metaPayload), {
+                    httpMetadata: { contentType: "application/json" },
+                    customMetadata: { documentId, contentHash },
+                })
+
+                // Save extracted text to R2 to prevent Workflow step state payload limit
                 await r2.put(extractedTextKey, text.trim(), {
                     httpMetadata: { contentType: "text/plain; charset=utf-8" },
                     customMetadata: { documentId, fileName },
@@ -133,12 +178,25 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     customMetadata: { documentId, fileName, totalPages: String(pages.length) },
                 })
 
+                const modeLabel =
+                    extractionMode === "ocr"
+                        ? `Scanned document (${ocrPagesCount} page(s) OCR'd)`
+                        : extractionMode === "mixed"
+                          ? `Mixed document (${ocrPagesCount} page(s) OCR'd of ${totalPages})`
+                          : `Text document (${totalPages} page(s))`
+
                 await report(
                     "chunking",
                     30,
-                    `Extracted ${pages.length} page(s) from "${fileName}". Preparing chunks.`
+                    `Extracted ${pages.length} page(s) from "${fileName}" [${modeLabel}]. Preparing chunks.`
                 )
-                return { textLength: text.length, totalPages: pages.length }
+
+                return {
+                    textLength: text.length,
+                    totalPages: pages.length,
+                    contentHash,
+                    isContentUnchanged,
+                }
             })
 
             // Step 3: Chunk text using natural boundaries, preserving page numbers
@@ -194,9 +252,9 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 return { totalChunks: chunks.length }
             })
 
-            // Step 4: Generate embeddings via Workers AI in bounded batches
+            // Step 4: Generate embeddings via Workers AI in bounded batches (skips if content unchanged)
             const vectorsKey = `intermediates/${documentId}/vectors.json`
-            await step.do(
+            const embeddingResult = await step.do(
                 "generate-embeddings",
                 {
                     retries: {
@@ -210,6 +268,19 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     const ai = this.env.AI
                     if (!ai) {
                         throw new Error("Workers AI binding (AI) is missing or unavailable.")
+                    }
+
+                    // Check if document was already fully indexed and content is identical
+                    const doc = await getDocument(documentId, this.env.DB).catch(() => null)
+                    if (
+                        extractionResult.isContentUnchanged &&
+                        doc?.status === "ready" &&
+                        doc?.chunk_count === chunkMeta.totalChunks
+                    ) {
+                        console.log(
+                            `[Workflow] Document ${documentId} content unchanged and already indexed. Skipping embedding generation.`
+                        )
+                        return { vectorCount: chunkMeta.totalChunks, skipped: true }
                     }
 
                     const chunksObj = await r2.get(chunksKey)
@@ -241,11 +312,11 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                         }
                     )
 
-                    return { vectorCount: vectors.length }
+                    return { vectorCount: vectors.length, skipped: false }
                 }
             )
 
-            // Step 5: Upsert vectors into Vectorize with batching and pageNumber metadata
+            // Step 5: Upsert vectors into Vectorize with clean orphan vector cleanup
             await step.do(
                 "index-vectors",
                 {
@@ -260,6 +331,35 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     const vectorize = this.env.VECTORIZE as VectorizeIndexBinding | undefined
                     if (!vectorize || typeof vectorize.upsert !== "function") {
                         throw new Error("Vectorize binding (VECTORIZE) is missing or unconfigured.")
+                    }
+
+                    const doc = await getDocument(documentId, this.env.DB).catch(() => null)
+                    const oldChunkCount = doc?.chunk_count || 0
+                    const newChunkCount = chunkMeta.totalChunks
+
+                    // If previously indexed with more chunks, delete obsolete trailing vector IDs
+                    if (
+                        oldChunkCount > newChunkCount &&
+                        typeof vectorize.deleteByIds === "function"
+                    ) {
+                        const orphanIds: string[] = []
+                        for (let i = newChunkCount; i < oldChunkCount; i++) {
+                            orphanIds.push(`${documentId}_${i}`)
+                        }
+                        await vectorize.deleteByIds(orphanIds).catch((delErr) => {
+                            console.warn(
+                                `[Workflow] Failed to delete orphan vectors for ${documentId}:`,
+                                delErr
+                            )
+                        })
+                    }
+
+                    // If embedding generation was skipped because content is already indexed
+                    if (embeddingResult.skipped) {
+                        console.log(
+                            `[Workflow] Document ${documentId} index already up to date. Skipping Vectorize upsert.`
+                        )
+                        return { chunksIndexed: newChunkCount, skipped: true }
                     }
 
                     const chunksObj = await r2.get(chunksKey)
@@ -315,7 +415,7 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                         }
                     )
 
-                    return { chunksIndexed: records.length }
+                    return { chunksIndexed: records.length, skipped: false }
                 }
             )
 
@@ -334,11 +434,23 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                     this.env.DB
                 )
 
-                // Clean up intermediate raw vectors file in R2 (best-effort);
-                // We intentionally preserve extractedTextKey and chunksKey for direct RAG prompt retrieval!
+                // Update meta.json with isIndexed flag
                 try {
                     const r2 = this.env.FILES
                     if (r2) {
+                        const metaObj = await r2.get(metaKey)
+                        if (metaObj) {
+                            const rawMeta = await (metaObj.text
+                                ? metaObj.text()
+                                : new TextDecoder().decode(await metaObj.arrayBuffer()))
+                            const metaData = JSON.parse(rawMeta)
+                            metaData.isIndexed = true
+                            metaData.totalChunks = chunkMeta.totalChunks
+                            await r2.put(metaKey, JSON.stringify(metaData), {
+                                httpMetadata: { contentType: "application/json" },
+                            })
+                        }
+                        // Clean up intermediate raw vectors file in R2 (best-effort)
                         await r2.delete([vectorsKey])
                     }
                 } catch (cleanupErr) {
@@ -367,8 +479,6 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
         } catch (error: unknown) {
             const rawMsg = error instanceof Error ? error.message : String(error)
 
-            // Query authoritative document stage and progress from D1 so workflow resume
-            // does not falsely overwrite the stage to "upload" with 0 progress
             const doc = await getDocument(documentId, this.env.DB).catch(() => null)
             const failedStage: DocumentStage = doc?.stage || currentStage || "failed"
             const failedProgress = doc?.progress ?? currentProgress
@@ -378,7 +488,6 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 error
             )
 
-            // Safe user-facing error message (avoid leaking internal credentials or stack traces)
             let safeMsg = rawMsg
             if (safeMsg.includes("REPLACE_WITH_") || safeMsg.includes("missing or unconfigured")) {
                 safeMsg = "Cloudflare service binding is not configured."
@@ -396,7 +505,6 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
             }
             await publishProgressEvent(this.env, failEvent)
 
-            // Clean up temporary vectors on terminal failure (best effort)
             try {
                 const r2 = this.env.FILES
                 if (r2) {
@@ -404,7 +512,6 @@ export class PdfProcessingWorkflow extends WorkflowEntrypoint<AppEnv, PdfWorkflo
                 }
             } catch {}
 
-            // Re-throw so Workflow registers terminal failure in Cloudflare dashboard
             throw error
         }
     }
