@@ -25,7 +25,7 @@ export default defineConfig({
             // D1 database binding
             DB: bindings.d1({
                 name: "chatbot-db",
-                id: "81e1eee3-ec8f-4868-8dab-caa4077b3013",
+                id: "52285e7e-0124-4a60-a144-03dc406a11fe",
             }),
             // R2 bucket for file storage
             FILES: bindings.r2({
