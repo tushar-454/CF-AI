@@ -1,7 +1,7 @@
+import { execSync, spawn } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { execSync, spawn } from "node:child_process"
 
 // If CLOUDFLARE_API_TOKEN is not explicitly provided, ensure Wrangler refreshes its token and read it
 if (!process.env.CLOUDFLARE_API_TOKEN) {
@@ -26,7 +26,7 @@ if (!process.env.CLOUDFLARE_API_TOKEN) {
 
 // Pass Account ID if not set
 if (!process.env.CLOUDFLARE_ACCOUNT_ID) {
-    process.env.CLOUDFLARE_ACCOUNT_ID = "84b09cdd14a077b27e00b990e8ac417f"
+    process.env.CLOUDFLARE_ACCOUNT_ID = "7ab77eaa396c9a6435e5659a299e07cf"
 }
 
 const child = spawn("vinext-cloudflare", ["deploy", ...process.argv.slice(2)], {
