@@ -1,34 +1,34 @@
-import test from "node:test"
 import assert from "node:assert/strict"
+import test from "node:test"
 
 // Real exported modules from codebase
+import { DocumentProgressDO } from "../src/lib/durable-object.ts"
 import {
-    chunkText,
-    chunkPages,
-    getEmbeddings,
-    queryKnowledge,
-    deleteDocumentVectors,
-    getDocumentR2Text,
-    getDocumentChunks,
-    retrieveDocumentContext,
-    indexDocumentChunks,
-} from "../src/lib/rag.ts"
-import {
-    extractPdfText,
-    extractPdfPages,
-    extractPdfDocument,
-    evaluatePageTextQuality,
-    mergePageText,
-    isCandidateOcrImage,
     computeImageHash,
     encodeRawToPng,
-    performVisionOcr,
+    evaluatePageTextQuality,
+    extractPdfDocument,
+    extractPdfPages,
+    extractPdfText,
+    isCandidateOcrImage,
     isPdfFile,
+    mergePageText,
+    performVisionOcr,
 } from "../src/lib/pdf.ts"
-import { DocumentProgressDO } from "../src/lib/durable-object.ts"
+import {
+    chunkPages,
+    chunkText,
+    deleteDocumentVectors,
+    getDocumentChunks,
+    getDocumentR2Text,
+    getEmbeddings,
+    indexDocumentChunks,
+    queryKnowledge,
+    retrieveDocumentContext,
+} from "../src/lib/rag.ts"
 
+import { createDocument, failDocument, getDocument, updateDocumentProgress } from "../src/lib/db.ts"
 import { createR2PresignedPutUrl } from "../src/lib/r2-presign.ts"
-import { createDocument, getDocument, updateDocumentProgress, failDocument } from "../src/lib/db.ts"
 
 test("PDF Processing Pipeline & Architecture Suite", async (t) => {
     // -------------------------------------------------------------
@@ -36,7 +36,7 @@ test("PDF Processing Pipeline & Architecture Suite", async (t) => {
     // -------------------------------------------------------------
     await t.test("1. R2 Presigned PUT URL generates valid SigV4 signature", async () => {
         const url = await createR2PresignedPutUrl({
-            accountId: "84b09cdd14a077b27e00b990e8ac417f",
+            accountId: "7ab77eaa396c9a6435e5659a299e07cf",
             bucketName: "chatbot-files",
             objectKey: "uploads/test-doc-123.pdf",
             accessKeyId: "mock_r2_key_id",
@@ -47,7 +47,7 @@ test("PDF Processing Pipeline & Architecture Suite", async (t) => {
 
         assert.ok(
             url.startsWith(
-                "https://84b09cdd14a077b27e00b990e8ac417f.r2.cloudflarestorage.com/chatbot-files/uploads/test-doc-123.pdf"
+                "https://7ab77eaa396c9a6435e5659a299e07cf.r2.cloudflarestorage.com/chatbot-files/uploads/test-doc-123.pdf"
             )
         )
         assert.ok(url.includes("X-Amz-Algorithm=AWS4-HMAC-SHA256"))
