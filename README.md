@@ -16,7 +16,7 @@ Before deploying or running with remote bindings, replace the placeholders in **
 | Resource            | Name / ID                                             | Binding     | Status                                                  |
 | ------------------- | ----------------------------------------------------- | ----------- | ------------------------------------------------------- |
 | **Account ID**      | `7ab77eaa396c9a6435e5659a299e07cf`                    | —           | Configured in `wrangler.jsonc` & `cloudflare.config.ts` |
-| **D1 Database**     | `chatbot-db` (`52285e7e-0124-4a60-a144-03dc406a11fe`) | `DB`        | Created & Migrations Executed                           |
+| **D1 Database**     | `chatbot-db` (`23e4591c-4d67-4851-8e50-772a7b1fc6be`) | `DB`        | Created & Migrations Executed                           |
 | **R2 Bucket**       | `chatbot-files`                                       | `FILES`     | Created                                                 |
 | **Vectorize Index** | `chatbot-rag-index` (768 dim, cosine)                 | `VECTORIZE` | Created                                                 |
 | **Workers AI**      | Multi-model catalog                                   | `AI`        | Ready                                                   |
