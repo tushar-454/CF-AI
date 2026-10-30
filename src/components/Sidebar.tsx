@@ -1,6 +1,8 @@
 "use client"
 
 import React, { useState, useMemo, useEffect } from "react"
+import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { Conversation } from "@/lib/types"
 import { DailyUsageSummary } from "@/lib/db"
 import { getAuthHeaders } from "@/lib/auth-client"
@@ -55,6 +57,8 @@ export function Sidebar({
     onToggleTheme,
     usageSummary,
 }: SidebarProps) {
+    const pathname = usePathname() || ""
+    const isYouTubePage = pathname.startsWith("/youtube")
     const [searchQuery, setSearchQuery] = useState("")
     const [editingId, setEditingId] = useState<string | null>(null)
     const [editingTitle, setEditingTitle] = useState("")
@@ -268,37 +272,32 @@ export function Sidebar({
                 </div>
 
                 {/* Workspace Navigation Switcher */}
-                {(() => {
-                    const isYouTubePage =
-                        typeof window !== "undefined" &&
-                        window.location.pathname.startsWith("/youtube")
-                    return (
-                        <div className="flex items-center p-0.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] mb-3 text-xs font-medium">
-                            <a
-                                href="/"
-                                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-center transition-all ${
-                                    !isYouTubePage
-                                        ? "bg-[var(--surface-bg)] text-[var(--accent)] font-semibold shadow-xs"
-                                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                                }`}
-                            >
-                                <BookOpenIcon size={13} />
-                                <span>Docs</span>
-                            </a>
-                            <a
-                                href="/youtube"
-                                className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-center transition-all ${
-                                    isYouTubePage
-                                        ? "bg-[var(--surface-bg)] text-red-600 dark:text-red-400 font-semibold shadow-xs"
-                                        : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                                }`}
-                            >
-                                <PlayIcon size={13} />
-                                <span>YouTube</span>
-                            </a>
-                        </div>
-                    )
-                })()}
+                <div className="flex items-center p-0.5 rounded-xl bg-[var(--input-bg)] border border-[var(--border)] mb-3 text-xs font-medium">
+                    <Link
+                        href="/"
+                        onClick={onCloseMobile}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-center transition-all ${
+                            !isYouTubePage
+                                ? "bg-[var(--surface-bg)] text-[var(--accent)] font-semibold shadow-xs"
+                                : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                        }`}
+                    >
+                        <BookOpenIcon size={13} />
+                        <span>Docs</span>
+                    </Link>
+                    <Link
+                        href="/youtube"
+                        onClick={onCloseMobile}
+                        className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-center transition-all ${
+                            isYouTubePage
+                                ? "bg-[var(--surface-bg)] text-red-600 dark:text-red-400 font-semibold shadow-xs"
+                                : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                        }`}
+                    >
+                        <PlayIcon size={13} />
+                        <span>YouTube</span>
+                    </Link>
+                </div>
 
                 {/* New Chat Button */}
                 <button

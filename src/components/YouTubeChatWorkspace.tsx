@@ -1,6 +1,8 @@
 "use client"
 
 import React, { useCallback, useEffect, useRef, useState } from "react"
+import Link from "next/link"
+import { useRouter } from "next/navigation"
 import {
     BookOpenIcon,
     CheckIcon,
@@ -50,6 +52,7 @@ const YOUTUBE_SUGGESTED_PROMPTS = [
 ]
 
 export function YouTubeChatWorkspace() {
+    const router = useRouter()
     // Authentication & App State
     const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null)
     const [theme, setTheme] = useState<"light" | "dark">("light")
@@ -602,7 +605,7 @@ export function YouTubeChatWorkspace() {
                 }}
                 onCopyLink={handleCopyChatLink}
                 onOpenKnowledgeBase={() => {
-                    window.location.href = "/"
+                    router.push("/")
                 }}
                 isOpenMobile={isMobileSidebarOpen}
                 onCloseMobile={() => setIsMobileSidebarOpen(false)}
@@ -625,14 +628,14 @@ export function YouTubeChatWorkspace() {
                         </button>
 
                         {/* Back to Document Chat Button */}
-                        <a
+                        <Link
                             href="/"
                             className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--button-hover)] border border-[var(--border)] transition-colors"
                             title="Switch to Documents & PDF Chat"
                         >
                             <BookOpenIcon size={14} />
                             <span className="hidden sm:inline">Documents</span>
-                        </a>
+                        </Link>
 
                         {/* Video Title Header */}
                         {video && (
